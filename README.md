@@ -1,23 +1,14 @@
-# Internet Archive Repository Management Script
+# Internet Archive Interact
+
 
 An interactive command-line tool for managing Internet Archive repositories. 
 
 Use this script to list files, upload files, delete files, move files, and create new repositories with detailed metadata input. 
 
-Options include Test Mode (to simulate actions) and Permanent Mode (to execute changes).
-
-
-## Simple and Effective
-
-
-![alt text](image-1.png)
-
----
 
 ## Table of Contents
 
-- [Internet Archive Repository Management Script](#internet-archive-repository-management-script)
-  - [Simple and Effective](#simple-and-effective)
+- [Internet Archive Interact](#internet-archive-interact)
   - [Table of Contents](#table-of-contents)
   - [Features](#features)
   - [Prerequisites](#prerequisites)
@@ -26,8 +17,8 @@ Options include Test Mode (to simulate actions) and Permanent Mode (to execute c
     - [2. Setting Up the Script](#2-setting-up-the-script)
     - [3. Installing Python Libraries](#3-installing-python-libraries)
     - [4. Configuring Environment Variables](#4-configuring-environment-variables)
-  - [Usage](#usage)
-    - [Running the Script](#running-the-script)
+- [Usage](#usage)
+- [Running the Script](#running-the-script)
     - [Script Options](#script-options)
   - [Troubleshooting](#troubleshooting)
 - [Full Breakdown and Feature Notes](#full-breakdown-and-feature-notes)
@@ -43,9 +34,8 @@ Options include Test Mode (to simulate actions) and Permanent Mode (to execute c
     - [8. `initialize_repository(folder_path, identifier, metadata, mode)`](#8-initialize_repositoryfolder_path-identifier-metadata-mode)
     - [9. `print_help()`](#9-print_help)
     - [10. `main()`](#10-main)
-  - [Features List](#features-list)
+- [Creator Notes](#creator-notes)
 
----
 
 ## Features
 
@@ -56,8 +46,6 @@ Options include Test Mode (to simulate actions) and Permanent Mode (to execute c
 - **Progress Bars:** Uses `tqdm` to display file upload progress.
 - **S3 Authentication:** Uses S3 access keys (set as environment variables) for secure communication with the Internet Archive.
 
----
-
 ## Prerequisites
 
 Before you begin, ensure you have:
@@ -65,133 +53,113 @@ Before you begin, ensure you have:
 - Python 3 installed
 - S3 Access Keys from [Internet Archive](https://archive.org/account/s3.php)
 - An active internet connection
-
----
+- Internet Archive Python Tool
 
 ## Installation
 
+
 ### 1. Preparing Your System
 
-**Update Your System:**
 
-```bash
-sudo apt update && sudo apt upgrade -y
-```
+Update Your System:
 
-**Install Python 3 and pip:**
+    sudo apt update && sudo apt upgrade -y
 
-```bash
-sudo apt install -y python3 python3-pip
-```
+Install Python 3 and pip:
 
-**Verify the Installation:**
+    sudo apt install -y python3 python3-pip
 
-```bash
-python3 --version
-pip3 --version
-```
+Install internet archive CLI via pipx:
 
-**(Optional) Install Git:**
+    pipx install internetarchive
 
-```bash
-sudo apt install -y git
-```
-
----
 
 ### 2. Setting Up the Script
 
-**Create a Working Directory:**
 
-```bash
-mkdir ~/internet_archive_tool && cd ~/internet_archive_tool
-```
+**Download the Script into your home or internet archive folder**
 
-**Download the Script:**
 
-- *Option 1: Clone from GitHub (if available):*
+![alt text](image-2.png)
 
-  ```bash
-  git clone [REPOSITORY_URL] .
-  ```
+- *Option 2: Clone from GitHub (if available):*
 
-- *Option 2: Create the Script Manually:*
 
-  Open your text editor and create a file named `internet_archive_tool.py`:
+    git clone https://github.com/harrypm/IA-Interact.git
 
-  ```bash
-  nano internet_archive_tool.py
-  ```
 
-  Paste the full script code into the file, then save and exit.
+- *Option 3: Create the Script Manually:*
+
+1. Open your text editor and create a file named `ia-interact.py`:
+2. Paste the full script code into the file, then save and exit.
 
 **(Optional) Make the Script Executable:**
 
-```bash
-chmod +x internet_archive_tool.py
-```
-
----
+   chmod +x ia-interact.py
 
 ### 3. Installing Python Libraries
 
+
 **Install Required Libraries:**
 
-```bash
-pip3 install requests tqdm
-```
+   pip3 install requests tqdm
 
 **Verify the Library Installation:**
 
-```bash
-pip3 show requests tqdm
-```
+    pip3 show requests tqdm
 
----
+
+![alt text](image-3.png)
 
 ### 4. Configuring Environment Variables
 
+
 **Obtain Your S3 Access Keys:**
 
-Retrieve your S3 keys from [Internet Archive](https://archive.org/account/s3.php).
+Retrieve your S3 keys from [Internet Archive Account Page](https://archive.org/account/s3.php).
 
 **Set Up Environment Variables:**
 
 Edit your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`) and add:
 
-```bash
-export S3_ACCESS_KEY="your-access-key"
-export S3_SECRET_KEY="your-secret-key"
-```
+
+    export S3_ACCESS_KEY="your-access-key"
+    export S3_SECRET_KEY="your-secret-key"
+
 
 Replace `"your-access-key"` and `"your-secret-key"` with your actual keys.
 
 **Reload the Configuration:**
 
-```bash
-source ~/.bashrc
-```
+   source ~/.bashrc
 
 **Test the Environment Variables:**
 
-```bash
-echo $S3_ACCESS_KEY
-echo $S3_SECRET_KEY
-```
 
----
+    echo $S3_ACCESS_KEY
+    echo $S3_SECRET_KEY
 
-## Usage
 
-### Running the Script
+# Usage
+
+
+![alt text](image-1.png)
+
+
+# Running the Script
+
 
 To execute the script, run:
 
-```bash
-python3 internet_archive_tool.py
-```
+    python3 ia-interact.py
+
+To interact with a repo, simply copy the web link like such:
+
+    https://archive.org/details/xxxxxxxxxx
+
 
 ### Script Options
+
 
 When the script runs, it displays an interactive menu with the following options:
 
@@ -207,23 +175,21 @@ During repository creation, you will be prompted to:
 - Specify if the repository is a **test item** (*Note: Test items are automatically deleted after 30 days*).
 - Choose between **Test Mode** (simulate actions without an actual upload) and **Permanent Mode** (execute actual uploads).
 
----
 
 ## Troubleshooting
+
 
 - **Missing Libraries:**  
   If you encounter errors about missing libraries, run:
 
-  ```bash
-  pip3 install requests tqdm
-  ```
+
+   pip3 install requests tqdm
+
 
 - **Environment Variables Not Set:**  
   Ensure your environment variables are defined in your shell configuration file and reload it:
 
-  ```bash
-  source ~/.bashrc
-  ```
+   source ~/.bashrc
 
 - **API or Network Issues:**  
   Verify that your S3 keys are correct and that your internet connection is stable.
@@ -231,9 +197,8 @@ During repository creation, you will be prompted to:
 - **Logging:**  
   To help with debugging, you can redirect output to a log file:
 
-  ```bash
-  python3 internet_archive_tool.py > script_output.log 2>&1
-  ```
+   python3 ia-interact.py > script_output.log 2>&1
+
 
 
 # Full Breakdown and Feature Notes
@@ -251,6 +216,8 @@ During repository creation, you will be prompted to:
 - **User Interaction:** Offers an interactive menu with a help option, test mode (simulation) vs. permanent mode, and filtering to avoid showing files from ".thumbs" directories.
 
 This script uses the Internet Archive’s S3-compatible interface and Metadata API, and it includes robust file upload logic (with chunking, progress bars, and retry strategies).
+
+
 
 ---
 
@@ -358,34 +325,9 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
     - **For Existing Repositories (options 1–4):** Prompts for the repository URL after the option selection.
     - **For Folder-based Repository Creation (option 5):** Gathers folder path, mode, and metadata.
   - **Action Dispatch:** Calls the corresponding function based on the user’s selection.
-  
----
 
-## Features List
 
-- **Interactive Command-Line Menu:**  
-  Provides a user-friendly interface to access multiple repository operations.
+# Creator Notes
 
-- **Real HTTP Operations:**  
-  All file operations (upload, list, delete, move) use actual HTTP requests in compliance with the Internet Archive’s API.
 
-- **Chunked File Uploads with Progress Bar:**  
-  Supports large file transfers by uploading in 2MB chunks and displaying progress using the `tqdm` library.
-
-- **Robust Retry Strategy:**  
-  Uses an HTTP adapter with exponential backoff to handle transient upload errors.
-
-- **S3-Compatible Authentication:**  
-  Reads S3 access keys from environment variables for secure communication with Internet Archive’s S3 endpoint.
-
-- **Metadata Collection:**  
-  Enables the creation of new repositories with detailed metadata, including collection selection and subject tags.
-
-- **Test vs. Permanent Mode:**  
-  Offers a simulation mode (Test Mode) for safe configuration verification along with full execution (Permanent Mode).
-
-- **Directory Filtering:**  
-  Automatically excludes files in directories with “.thumbs” from repository file listings.
-
-- **Comprehensive Help:**  
-  A built-in help option displays detailed usage instructions for all available operations.
+This script was built using Microsoft Copilot, and 5 hours of Harry Munday's lifespan, Enjoy. 
