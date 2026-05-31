@@ -17,6 +17,9 @@ Use this script to list files, upload files, download files, delete files, move 
     - [2. Setting Up the Script](#2-setting-up-the-script)
     - [3. Installing Python Libraries](#3-installing-python-libraries)
     - [4. Configuring Environment Variables](#4-configuring-environment-variables)
+    - [5. Build Local Portable Binaries](#5-build-local-portable-binaries)
+    - [6. GitHub Actions: Portable Releases](#6-github-actions-portable-releases)
+    - [7. Windows Python Mode Notes (from issue #1)](#7-windows-python-mode-notes-from-issue-1)
 - [Usage](#usage)
 - [Running the Script](#running-the-script)
     - [Script Options](#script-options)
@@ -154,28 +157,64 @@ The binary will be output to:
 On Windows, the file will be:
 
     dist/ia-interact.exe
-Build a Linux `.AppImage`:
+
+Build a Linux `.AppImage` (x86_64):
 
     chmod +x scripts/build-appimage.sh
     ./scripts/build-appimage.sh
-
-The AppImage will be output to:
+The x86_64 AppImage will be output to:
 
     release/ia-interact-linux-x86_64.AppImage
 
-# GitHub Actions: Portable Releases
+Build a Linux `.AppImage` (arm64):
+
+    APPIMAGE_ARCH=aarch64 ./scripts/build-appimage.sh
+
+The arm64 AppImage will be output to:
+
+    release/ia-interact-linux-aarch64.AppImage
+### 6. GitHub Actions: Portable Releases
 
 This repository includes:
 
     .github/workflows/build-binaries.yml
 
 The workflow builds portable release artifacts for:
-- Linux: `.AppImage`
-- Windows: `.exe`
-- macOS: `.app` packaged as `.app.zip`
+- Linux x86_64: `ia-interact-linux-x86_64.AppImage`
+- Linux arm64: `ia-interact-linux-aarch64.AppImage`
+- Windows x86_64: `ia-interact-windows-x86_64.exe`
+- Windows arm64: `ia-interact-windows-arm64.exe`
+- macOS universal (arm64 + x86_64): `ia-interact-macos-universal.app.zip`
 
 Each run uploads these as workflow artifacts.
 When you push a tag matching `v*` (for example `v1.0.0`), the workflow also publishes these files to the GitHub Release for that tag.
+### 7. Windows Python Mode Notes (from issue #1)
+Issue reference: `https://github.com/harrypm/IA-Interact/issues/1`
+
+The issue confirms the script can be run directly on Windows with Python.
+
+Recommended flow:
+1. Install Python on Windows and enable **Add Python to PATH** during install.
+2. Open `cmd` in the folder containing `ia-interact.py` (File Explorer address bar -> type `cmd`).
+3. Install dependencies:
+
+       python -m pip install requests tqdm
+
+4. Run the tool:
+
+       python -m ia-interact
+
+   Alternative:
+
+       python ia-interact.py
+
+5. Configure S3 keys before use (recommended: environment variables rather than hardcoding keys in the script).
+   - The issue notes also mention replacing `os.getenv("S3_ACCESS_KEY")` and `os.getenv("S3_SECRET_KEY")` inline in the script.
+   - If you do that for troubleshooting, keep it local-only and do not commit secrets.
+
+Large upload note from the issue:
+- In the upload flow, choosing **new folder** is more reliable for large uploads.
+- Using existing folder with `./` may return a `400` error.
 
 
 # Usage

@@ -6,8 +6,25 @@ DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/build"
 RELEASE_DIR="$ROOT_DIR/release"
 APPDIR="$ROOT_DIR/AppDir"
-APPIMAGE_TOOL="$ROOT_DIR/appimagetool-x86_64.AppImage"
-OUTPUT_APPIMAGE="$RELEASE_DIR/ia-interact-linux-x86_64.AppImage"
+APPIMAGE_ARCH="${APPIMAGE_ARCH:-x86_64}"
+
+case "$APPIMAGE_ARCH" in
+  x86_64)
+    APPIMAGE_TOOL_ARCH="x86_64"
+    ;;
+  aarch64|arm64)
+    APPIMAGE_ARCH="aarch64"
+    APPIMAGE_TOOL_ARCH="aarch64"
+    ;;
+  *)
+    printf 'Unsupported APPIMAGE_ARCH: %s\n' "$APPIMAGE_ARCH" >&2
+    printf 'Supported values: x86_64, aarch64 (or arm64)\n' >&2
+    exit 1
+    ;;
+esac
+
+APPIMAGE_TOOL="$ROOT_DIR/appimagetool-${APPIMAGE_TOOL_ARCH}.AppImage"
+OUTPUT_APPIMAGE="$RELEASE_DIR/ia-interact-linux-${APPIMAGE_ARCH}.AppImage"
 
 pyinstaller \
   --clean \
@@ -55,11 +72,11 @@ fi
 cp "$APPDIR/ia-interact.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/ia-interact.png"
 
 if [[ ! -x "$APPIMAGE_TOOL" ]]; then
-  curl -fsSL -o "$APPIMAGE_TOOL" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+  curl -fsSL -o "$APPIMAGE_TOOL" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${APPIMAGE_TOOL_ARCH}.AppImage"
   chmod +x "$APPIMAGE_TOOL"
 fi
 
 mkdir -p "$RELEASE_DIR"
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE_TOOL" "$APPDIR" "$OUTPUT_APPIMAGE"
+ARCH="$APPIMAGE_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGE_TOOL" "$APPDIR" "$OUTPUT_APPIMAGE"
 
 printf 'AppImage created at %s\n' "$OUTPUT_APPIMAGE"
