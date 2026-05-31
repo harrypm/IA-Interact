@@ -3,7 +3,7 @@
 
 An interactive command-line tool for managing Internet Archive repositories. 
 
-Use this script to list files, upload files, delete files, move files, and create new repositories with detailed metadata input. 
+Use this script to list files, upload files, download files, delete files, move files, and create new repositories with detailed metadata input. 
 
 
 ## Table of Contents
@@ -38,8 +38,7 @@ Use this script to list files, upload files, delete files, move files, and creat
 
 
 ## Features
-
-- **Interactive Menu:** Choose options to list files, upload files, delete or move files, or create a new repository.
+- **Interactive Menu:** Choose options to list files, upload files, download files, delete or move files, or create a new repository.
 - **Test Mode & Permanent Mode:** Run in simulation (Test Mode, where no changes are made) or execute actual changes (Permanent Mode).
 - **Metadata Support:** Input metadata including title, description, creator, date, language, license URL, collection, subject tags, and test item status.
 - **Collection Options:** Supports collections such as `community`, `opensource`, `texts`, `movies`, `audio`, `image`, `etree`, `folksoundomy`, `games`, and `software`.
@@ -138,6 +137,36 @@ Replace `"your-access-key"` and `"your-secret-key"` with your actual keys.
 
     echo $S3_ACCESS_KEY
     echo $S3_SECRET_KEY
+### 5. Build a Local Binary
+
+Install build dependencies:
+
+    pip3 install -r requirements-build.txt
+
+Build a single-file executable:
+
+    pyinstaller --clean --onefile --name ia-interact ia-interact.py
+
+The binary will be output to:
+
+    dist/ia-interact
+
+On Windows, the file will be:
+
+    dist/ia-interact.exe
+
+# GitHub Actions: Cross-Platform Binaries
+
+This repository includes:
+
+    .github/workflows/build-binaries.yml
+
+The workflow builds platform binaries for:
+- Linux (`ubuntu-latest`)
+- macOS (`macos-latest`)
+- Windows (`windows-latest`)
+
+Each run uploads build artifacts with platform-specific names.
 
 
 # Usage
@@ -165,6 +194,7 @@ When the script runs, it displays an interactive menu with the following options
 
 - **List Files:** Display the contents of an existing repository.
 - **Upload Files:** Add files to a repository.
+- **Download Files:** Download one file or all files from a repository to a local folder.
 - **Delete/Move Files:** Manage files within a repository.
 - **Create a New Repository:** Upload an entire folder and configure repository metadata.
 
@@ -212,6 +242,7 @@ During repository creation, you will be prompted to:
 - **Listing Repository Contents:** Retrieve and display the contents of a repository using the metadata API.
 - **Deleting Files:** Remove specified files from a repository.
 - **Moving Files:** Change a file’s location within a repository by copying it and then deleting the original.
+- **Downloading Files:** Download a single file or all files from a repository to a local path.
 - **Creating a New Repository:** Upload a folder as a new repository and submit metadata.
 - **User Interaction:** Offers an interactive menu with a help option, test mode (simulation) vs. permanent mode, and filtering to avoid showing files from ".thumbs" directories.
 
@@ -320,10 +351,10 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
 - **Purpose:**  
   Serves as the entry point of the script with an interactive menu.
 - **Key Features:**
-  - **Main Menu:** Displays options for uploading, listing, deleting, moving files, creating a repository, or viewing help.
+  - **Main Menu:** Displays options for uploading, listing, deleting, moving, and downloading files, creating a repository, or viewing help.
   - **Conditional Prompts:**  
-    - **For Existing Repositories (options 1–4):** Prompts for the repository URL after the option selection.
-    - **For Folder-based Repository Creation (option 5):** Gathers folder path, mode, and metadata.
+    - **For Existing Repositories (options 1–5):** Prompts for the repository URL after the option selection.
+    - **For Folder-based Repository Creation (option 6):** Gathers folder path, mode, and metadata.
   - **Action Dispatch:** Calls the corresponding function based on the user’s selection.
 
 

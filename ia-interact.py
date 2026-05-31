@@ -4,6 +4,7 @@ import requests
 from tqdm import tqdm
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import quote
 
 def get_repo_identifier(repo_link):
     """
@@ -166,6 +167,88 @@ def move_file(identifier, file_name, source_dir, target_dir):
     except Exception as e:
         print("Error during file move (copy-delete):", e)
         return False
+def download_file_with_progress(identifier, file_name, destination_dir):
+    """
+    Downloads a file from an Internet Archive repository with progress tracking.
+    """
+    safe_relative_path = os.path.normpath(file_name).lstrip("/\\")
+    if safe_relative_path.startswith(".."):
+        print(f"Skipping unsafe file path: {file_name}")
+        return False
+
+    download_url = f"https://archive.org/download/{identifier}/{quote(file_name, safe='/')}"
+    output_path = os.path.join(destination_dir, safe_relative_path)
+    output_folder = os.path.dirname(output_path)
+
+    if output_folder:
+        os.makedirs(output_folder, exist_ok=True)
+
+    try:
+        response = requests.get(download_url, stream=True, timeout=(60, 600))
+        if response.status_code != 200:
+            print(f"Error downloading {file_name}: {response.status_code} {response.reason}")
+            return False
+
+        total_size = int(response.headers.get("content-length", 0))
+        progress_total = total_size if total_size > 0 else None
+
+        with tqdm(total=progress_total, unit="B", unit_scale=True, desc=f"Downloading {os.path.basename(file_name)}") as pbar:
+            with open(output_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+        print(f"Downloaded '{file_name}' to '{output_path}'")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"Request error during download: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected download error: {e}")
+        return False
+
+def download_repository_files(identifier):
+    """
+    Downloads one or all files from a repository.
+    """
+    file_list = list_repository_files(identifier)
+    if not file_list:
+        return
+
+    destination_dir_input = input("Enter destination folder (leave blank for current directory): ").strip().strip('\"').strip("'")
+    destination_dir = os.path.abspath(os.path.expanduser(destination_dir_input)) if destination_dir_input else os.getcwd()
+
+    try:
+        os.makedirs(destination_dir, exist_ok=True)
+    except OSError as e:
+        print(f"Unable to create/access destination folder: {e}")
+        return
+
+    print("\nDownload Options:")
+    print("1. Download a single file")
+    print("2. Download all files")
+    download_choice = input("Enter your choice (1 or 2): ").strip()
+
+    if download_choice == "1":
+        print("Enter the number of the file to download:")
+        try:
+            index = int(input().strip()) - 1
+            if 0 <= index < len(file_list):
+                download_file_with_progress(identifier, file_list[index], destination_dir)
+            else:
+                print("Invalid index.")
+        except ValueError:
+            print("Invalid input.")
+    elif download_choice == "2":
+        successful_downloads = 0
+        for file_name in file_list:
+            if download_file_with_progress(identifier, file_name, destination_dir):
+                successful_downloads += 1
+        print(f"\nDownloaded {successful_downloads} of {len(file_list)} files.")
+    else:
+        print("Invalid choice. Exiting download menu.")
 
 def create_rules_file(folder_path):
     """
@@ -293,9 +376,11 @@ Main Menu Options:
    - List files and choose one to delete.
 4. Move a file within a repository:
    - Copy a file to a new directory using x-amz-copy-source, then delete the original.
-5. Create or access a repository from a folder:
+5. Download files from a repository:
+   - Download one or all files to a local destination folder.
+6. Create or access a repository from a folder:
    - Upload an entire folder as a new repository with metadata and mode selection.
-6. Help:
+7. Help:
    - Display this help information.
 
 Instructions:
@@ -315,14 +400,15 @@ def main():
     print("2. List files in a repository")
     print("3. Delete a file from a repository")
     print("4. Move a file within a repository")
-    print("5. Create or access a repository from a folder")
-    print("6. Help")
-    choice = input("Enter your choice (1-6): ").strip()
+    print("5. Download files from a repository")
+    print("6. Create or access a repository from a folder")
+    print("7. Help")
+    choice = input("Enter your choice (1-7): ").strip()
 
-    if choice == "6":
+    if choice == "7":
         print_help()
         main()
-    elif choice == "5":
+    elif choice == "6":
         folder_path = input("Enter the folder path to upload as a repository: ").strip().strip('\"').strip('\'')
         if not os.path.isdir(folder_path):
             print("Invalid folder path. Please check if the directory exists and is accessible.")
@@ -345,7 +431,7 @@ def main():
             print("Repository identifier is required.")
             return
         initialize_repository(folder_path, identifier, metadata, mode)
-    elif choice in ("1", "2", "3", "4"):
+    elif choice in ("1", "2", "3", "4", "5"):
         repo_link = input("Enter the Internet Archive repository link: ").strip()
         identifier = get_repo_identifier(repo_link)
         if not identifier:
@@ -408,6 +494,8 @@ def main():
                     print("Invalid index.")
             except ValueError:
                 print("Invalid input.")
+        elif choice == "5":
+            download_repository_files(identifier)
     else:
         print("Invalid choice. Exiting.")
 
