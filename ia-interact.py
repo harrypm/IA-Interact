@@ -1,5 +1,7 @@
+import argparse
 import os
 import re
+import sys
 import requests
 from tqdm import tqdm
 from requests.adapters import HTTPAdapter
@@ -499,5 +501,47 @@ def main():
     else:
         print("Invalid choice. Exiting.")
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="IA Interact CLI/GUI launcher")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch the GUI instead of the interactive CLI menu."
+    )
+    mode_group.add_argument(
+        "--cli",
+        action="store_true",
+        help="Force the interactive CLI menu."
+    )
+    return parser.parse_args()
+
+def select_launch_mode(args):
+    if args.gui:
+        return "gui"
+    if args.cli:
+        return "cli"
+
+    interactive_terminal = sys.stdin.isatty() and sys.stdout.isatty()
+    if interactive_terminal:
+        return "cli"
+
+    has_graphical_session = (
+        bool(os.environ.get("DISPLAY"))
+        or bool(os.environ.get("WAYLAND_DISPLAY"))
+        or sys.platform in ("win32", "darwin")
+    )
+    if has_graphical_session:
+        return "gui"
+
+    return "cli"
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if select_launch_mode(args) == "gui":
+        from ia_interact_gui import main as gui_main
+        gui_main()
+    else:
+        main()

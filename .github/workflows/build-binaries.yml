@@ -78,14 +78,23 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          pyinstaller --clean --onefile --name ia-interact ia-interact.py
+          pyinstaller --clean --onefile --name ia-interact --icon assets/icons/internet-archive.ico ia-interact.py
           New-Item -ItemType Directory -Path release -Force | Out-Null
           Copy-Item dist/ia-interact.exe "release/ia-interact-windows-${{ matrix.windows_arch_suffix }}.exe"
+      - name: Build macOS .icns icon
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p build/ia-interact.iconset
+          for size in 16 32 128 256 512; do
+            sips -z "${size}" "${size}" assets/icons/internet-archive.png --out "build/ia-interact.iconset/icon_${size}x${size}.png"
+            sips -z "$((size * 2))" "$((size * 2))" assets/icons/internet-archive.png --out "build/ia-interact.iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil -c icns build/ia-interact.iconset -o build/internet-archive.icns
 
       - name: Build macOS universal .app bundle archive
         if: matrix.platform == 'macos'
         run: |
-          pyinstaller --clean --onedir --windowed --target-architecture universal2 --name ia-interact ia-interact.py
+          pyinstaller --clean --onedir --windowed --target-architecture universal2 --name ia-interact --icon build/internet-archive.icns ia-interact.py
           mkdir -p release
           ditto -c -k --sequesterRsrc --keepParent dist/ia-interact.app release/ia-interact-macos-universal.app.zip
 

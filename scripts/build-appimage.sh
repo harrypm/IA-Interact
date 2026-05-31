@@ -7,6 +7,15 @@ BUILD_DIR="$ROOT_DIR/build"
 RELEASE_DIR="$ROOT_DIR/release"
 APPDIR="$ROOT_DIR/AppDir"
 APPIMAGE_ARCH="${APPIMAGE_ARCH:-x86_64}"
+VENV_PATH="$ROOT_DIR/.venv-build"
+ICON_PNG="$ROOT_DIR/assets/icons/internet-archive.png"
+if [ -n "${BUILD_PYTHON:-}" ]; then
+  PYTHON_BIN="$BUILD_PYTHON"
+elif [ -x "/usr/bin/python3" ] && /usr/bin/python3 -c "import tkinter" >/dev/null 2>&1; then
+  PYTHON_BIN="/usr/bin/python3"
+else
+  PYTHON_BIN="python3"
+fi
 
 case "$APPIMAGE_ARCH" in
   x86_64)
@@ -25,10 +34,24 @@ esac
 
 APPIMAGE_TOOL="$ROOT_DIR/appimagetool-${APPIMAGE_TOOL_ARCH}.AppImage"
 OUTPUT_APPIMAGE="$RELEASE_DIR/ia-interact-linux-${APPIMAGE_ARCH}.AppImage"
+if [ -d "$VENV_PATH" ] && ! "$VENV_PATH/bin/python" -c "import tkinter" >/dev/null 2>&1; then
+  rm -rf "$VENV_PATH"
+fi
+if [ ! -d "$VENV_PATH" ]; then
+  "$PYTHON_BIN" -m venv "$VENV_PATH"
+fi
 
-pyinstaller \
+if [ ! -f "$ICON_PNG" ]; then
+  printf 'Missing icon asset: %s\n' "$ICON_PNG" >&2
+  exit 1
+fi
+"$VENV_PATH/bin/python" -m pip install --upgrade pip
+"$VENV_PATH/bin/python" -m pip install -r "$ROOT_DIR/requirements-build.txt"
+
+"$VENV_PATH/bin/pyinstaller" \
   --clean \
   --onefile \
+  --icon "$ICON_PNG" \
   --name ia-interact \
   --distpath "$DIST_DIR" \
   --workpath "$BUILD_DIR" \
@@ -42,32 +65,37 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
 cp "$DIST_DIR/ia-interact" "$APPDIR/usr/bin/ia-interact"
 chmod +x "$APPDIR/usr/bin/ia-interact"
-ln -s usr/bin/ia-interact "$APPDIR/AppRun"
+cat > "$APPDIR/AppRun" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BIN="$HERE/usr/bin/ia-interact"
+
+if [ "$#" -eq 0 ]; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec "$BIN" --cli
+  fi
+  exec "$BIN" --gui
+fi
+
+exec "$BIN" "$@"
+EOF
+chmod +x "$APPDIR/AppRun"
 
 cat > "$APPDIR/ia-interact.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=IA Interact
-Exec=ia-interact
+Exec=ia-interact --gui
 Icon=ia-interact
-Terminal=true
+Terminal=false
 Categories=Utility;
 EOF
 
 cp "$APPDIR/ia-interact.desktop" "$APPDIR/usr/share/applications/ia-interact.desktop"
 
-if [[ -f "$ROOT_DIR/image.png" ]]; then
-  cp "$ROOT_DIR/image.png" "$APPDIR/ia-interact.png"
-else
-  python - "$APPDIR/ia-interact.png" <<'PY'
-import base64
-import pathlib
-import sys
-
-target = pathlib.Path(sys.argv[1])
-target.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlAb3kAAAAASUVORK5CYII="))
-PY
-fi
+cp "$ICON_PNG" "$APPDIR/ia-interact.png"
 
 cp "$APPDIR/ia-interact.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/ia-interact.png"
 

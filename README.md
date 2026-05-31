@@ -20,6 +20,7 @@ Use this script to list files, upload files, download files, delete files, move 
     - [5. Build Local Portable Binaries](#5-build-local-portable-binaries)
     - [6. GitHub Actions: Portable Releases](#6-github-actions-portable-releases)
     - [7. Windows Python Mode Notes (from issue #1)](#7-windows-python-mode-notes-from-issue-1)
+    - [8. GUI Mode (Login + File Selection)](#8-gui-mode-login--file-selection)
 - [Usage](#usage)
 - [Running the Script](#running-the-script)
     - [Script Options](#script-options)
@@ -42,6 +43,8 @@ Use this script to list files, upload files, download files, delete files, move 
 
 ## Features
 - **Interactive Menu:** Choose options to list files, upload files, download files, delete or move files, or create a new repository.
+- **Basic GUI Mode:** Includes a login page for S3 keys, repository file list selection for download, and local file list selection for upload.
+- **Single Launcher:** One executable supports both modes (CLI by default, GUI via `--gui`).
 - **Test Mode & Permanent Mode:** Run in simulation (Test Mode, where no changes are made) or execute actual changes (Permanent Mode).
 - **Metadata Support:** Input metadata including title, description, creator, date, language, license URL, collection, subject tags, and test item status.
 - **Collection Options:** Supports collections such as `community`, `opensource`, `texts`, `movies`, `audio`, `image`, `etree`, `folksoundomy`, `games`, and `software`.
@@ -53,6 +56,7 @@ Use this script to list files, upload files, download files, delete files, move 
 Before you begin, ensure you have:
 - A Linux environment (Ubuntu, Debian, etc.)
 - Python 3 installed
+- Tkinter support (`python3-tk` on Linux if your distro does not include it by default)
 - S3 Access Keys from [Internet Archive](https://archive.org/account/s3.php)
 - An active internet connection
 - Internet Archive Python Tool
@@ -150,6 +154,10 @@ Build a single-file Linux executable:
 
     pyinstaller --clean --onefile --name ia-interact ia-interact.py
 
+Release icon asset used by packaged binaries:
+
+    assets/icons/internet-archive.png
+
 The binary will be output to:
 
     dist/ia-interact
@@ -157,6 +165,14 @@ The binary will be output to:
 On Windows, the file will be:
 
     dist/ia-interact.exe
+
+Run CLI mode from the packaged binary:
+
+    ./dist/ia-interact --cli
+
+Run GUI mode from the same packaged binary:
+
+    ./dist/ia-interact --gui
 
 Build a Linux `.AppImage` (x86_64):
 
@@ -185,6 +201,8 @@ The workflow builds portable release artifacts for:
 - Windows x86_64: `ia-interact-windows-x86_64.exe`
 - Windows arm64: `ia-interact-windows-arm64.exe`
 - macOS universal (arm64 + x86_64): `ia-interact-macos-universal.app.zip`
+
+These release targets use Internet Archive icon assets from `assets/icons/`.
 
 Each run uploads these as workflow artifacts.
 When you push a tag matching `v*` (for example `v1.0.0`), the workflow also publishes these files to the GitHub Release for that tag.
@@ -215,6 +233,21 @@ Recommended flow:
 Large upload note from the issue:
 - In the upload flow, choosing **new folder** is more reliable for large uploads.
 - Using existing folder with `./` may return a `400` error.
+### 8. GUI Mode (Login + File Selection)
+Run the GUI:
+
+    python3 ia-interact-gui.py
+
+Or use the unified launcher:
+
+    python3 ia-interact.py --gui
+
+GUI flow:
+1. Enter S3 access and secret keys on the login page.
+2. Enter your repository URL or identifier and click **Load Repository Files**.
+3. Select repository files (left list) to download.
+4. Add/select local files (right list) to upload.
+5. Set target upload directory and run upload/download actions.
 
 
 # Usage
@@ -230,9 +263,26 @@ To execute the script, run:
 
     python3 ia-interact.py
 
+To launch the GUI version, run:
+    python3 ia-interact.py --gui
+    python3 ia-interact-gui.py
+
+To force CLI mode explicitly, run:
+    python3 ia-interact.py --cli
+
 To interact with a repo, simply copy the web link like such:
 
     https://archive.org/details/xxxxxxxxxx
+
+From AppImage output, run CLI mode:
+
+    ./release/ia-interact-linux-x86_64.AppImage --cli
+
+From the same AppImage, run GUI mode:
+
+    ./release/ia-interact-linux-x86_64.AppImage --gui
+
+When opened/clicked from a desktop environment, the packaged app defaults to GUI mode.
 
 
 ### Script Options
