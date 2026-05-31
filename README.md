@@ -137,13 +137,13 @@ Replace `"your-access-key"` and `"your-secret-key"` with your actual keys.
 
     echo $S3_ACCESS_KEY
     echo $S3_SECRET_KEY
-### 5. Build a Local Binary
+### 5. Build Local Portable Binaries
 
 Install build dependencies:
 
     pip3 install -r requirements-build.txt
 
-Build a single-file executable:
+Build a single-file Linux executable:
 
     pyinstaller --clean --onefile --name ia-interact ia-interact.py
 
@@ -154,19 +154,28 @@ The binary will be output to:
 On Windows, the file will be:
 
     dist/ia-interact.exe
+Build a Linux `.AppImage`:
 
-# GitHub Actions: Cross-Platform Binaries
+    chmod +x scripts/build-appimage.sh
+    ./scripts/build-appimage.sh
+
+The AppImage will be output to:
+
+    release/ia-interact-linux-x86_64.AppImage
+
+# GitHub Actions: Portable Releases
 
 This repository includes:
 
     .github/workflows/build-binaries.yml
 
-The workflow builds platform binaries for:
-- Linux (`ubuntu-latest`)
-- macOS (`macos-latest`)
-- Windows (`windows-latest`)
+The workflow builds portable release artifacts for:
+- Linux: `.AppImage`
+- Windows: `.exe`
+- macOS: `.app` packaged as `.app.zip`
 
-Each run uploads build artifacts with platform-specific names.
+Each run uploads these as workflow artifacts.
+When you push a tag matching `v*` (for example `v1.0.0`), the workflow also publishes these files to the GitHub Release for that tag.
 
 
 # Usage

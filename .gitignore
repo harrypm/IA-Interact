@@ -5,3 +5,6 @@ dist/
 *.spec
 .venv/
 .venv-build/
+release/
+AppDir/
+appimagetool-*.AppImage
