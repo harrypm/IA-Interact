@@ -1,24 +1,57 @@
 import argparse
 import os
-import re
 import sys
 import requests
 from tqdm import tqdm
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
+
+
+def _extract_identifier_from_archive_url(value):
+    candidate = value
+    if "://" not in candidate and candidate.startswith("archive.org/"):
+        candidate = f"https://{candidate}"
+
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host not in ("archive.org", "www.archive.org"):
+        return None
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if not path_parts:
+        return None
+
+    if path_parts[0] in ("details", "download", "metadata"):
+        if len(path_parts) < 2:
+            return None
+        return path_parts[1]
+
+    return path_parts[0]
 
 def get_repo_identifier(repo_link):
     """
-    Extracts the repository identifier from an Internet Archive link.
-    Expected format: https://archive.org/details/{identifier}
+    Extracts the repository identifier from an Internet Archive link or raw identifier.
+    Supports archive.org/details, archive.org/download, archive.org/metadata, and plain identifiers.
     """
-    match = re.search(r"archive\.org/details/([^/]+)", repo_link)
-    if match:
-        return match.group(1)
-    else:
-        print("Invalid Internet Archive URL. Please provide a valid link.")
+    value = repo_link.strip().strip('"').strip("'")
+    if not value:
+        print("Invalid Internet Archive URL. Please provide a valid link or identifier.")
         return None
+
+    identifier = _extract_identifier_from_archive_url(value)
+    if identifier:
+        return identifier
+
+    if "/" not in value and " " not in value:
+        return value
+
+    print("Invalid Internet Archive URL. Please provide a valid link or identifier.")
+    return None
 
 def upload_file_with_progress(identifier, file_path, directory):
     """
@@ -434,7 +467,7 @@ def main():
             return
         initialize_repository(folder_path, identifier, metadata, mode)
     elif choice in ("1", "2", "3", "4", "5"):
-        repo_link = input("Enter the Internet Archive repository link: ").strip()
+        repo_link = input("Enter the Internet Archive repository link or identifier: ").strip()
         identifier = get_repo_identifier(repo_link)
         if not identifier:
             return

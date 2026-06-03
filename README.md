@@ -45,6 +45,7 @@ Use this script to list files, upload files, download files, delete files, move 
 - **Interactive Menu:** Choose options to list files, upload files, download files, delete or move files, or create a new repository.
 - **Basic GUI Mode:** Includes a login page for S3 keys, repository file list selection for download, and local file list selection for upload.
 - **Single Launcher:** One executable supports both modes (CLI by default, GUI via `--gui`).
+- **Flexible Repository Input:** Accepts a plain identifier (for example `my_item`) or Archive URLs such as `/details/`, `/download/`, and `/metadata/`.
 - **Test Mode & Permanent Mode:** Run in simulation (Test Mode, where no changes are made) or execute actual changes (Permanent Mode).
 - **Metadata Support:** Input metadata including title, description, creator, date, language, license URL, collection, subject tags, and test item status.
 - **Collection Options:** Supports collections such as `community`, `opensource`, `texts`, `movies`, `audio`, `image`, `etree`, `folksoundomy`, `games`, and `software`.
@@ -244,10 +245,12 @@ Or use the unified launcher:
 
 GUI flow:
 1. Enter S3 access and secret keys on the login page.
-2. Enter your repository URL or identifier and click **Load Repository Files**.
+2. Enter your repository URL or identifier (for example `archive.org/details/<id>`, `archive.org/download/<id>/...`, `archive.org/metadata/<id>`, or just `<id>`).
 3. Select repository files (left list) to download.
 4. Add/select local files (right list) to upload.
 5. Set target upload directory and run upload/download actions.
+   - Upload can start directly from a valid repository field value.
+   - Download requires a loaded repository file list.
 
 
 # Usage
@@ -270,9 +273,12 @@ To launch the GUI version, run:
 To force CLI mode explicitly, run:
     python3 ia-interact.py --cli
 
-To interact with a repo, simply copy the web link like such:
+To interact with a repo, you can use either the item identifier directly or a full Archive URL:
 
+    xxxxxxxxxx
     https://archive.org/details/xxxxxxxxxx
+    https://archive.org/download/xxxxxxxxxx/some/file.ext
+    https://archive.org/metadata/xxxxxxxxxx
 
 From AppImage output, run CLI mode:
 
@@ -354,9 +360,10 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
 
 ### 1. `get_repo_identifier(repo_link)`
 - **Purpose:**  
-  Extracts the repository identifier from a full Internet Archive URL.
+  Extracts the repository identifier from either a full Internet Archive URL or a plain identifier.
 - **How It Works:**  
-  Uses a regular expression to capture the pattern `/details/{identifier}`. If the URL is invalid, it alerts the user and returns `None`.
+  Normalizes and parses Archive URLs (`/details/`, `/download/`, `/metadata/`) and returns the item identifier.  
+  If a plain identifier is provided, it is accepted directly. If input is invalid, it alerts the user and returns `None`.
 
 ---
 

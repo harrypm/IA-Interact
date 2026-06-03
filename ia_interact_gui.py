@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import os
-import re
 import threading
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 try:
     import requests
 except ModuleNotFoundError as e:
@@ -156,14 +155,40 @@ class IAInteractGUI(tk.Tk):
         )
 
     @staticmethod
+    def _extract_identifier_from_archive_url(value):
+        candidate = value
+        if "://" not in candidate and candidate.startswith("archive.org/"):
+            candidate = f"https://{candidate}"
+
+        try:
+            parsed = urlparse(candidate)
+        except ValueError:
+            return None
+
+        host = (parsed.hostname or "").lower()
+        if host not in ("archive.org", "www.archive.org"):
+            return None
+
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if not path_parts:
+            return None
+
+        if path_parts[0] in ("details", "download", "metadata"):
+            if len(path_parts) < 2:
+                return None
+            return path_parts[1]
+
+        return path_parts[0]
+
+    @staticmethod
     def extract_repo_identifier(repo_input):
-        value = repo_input.strip()
+        value = repo_input.strip().strip('"').strip("'")
         if not value:
             return None
 
-        match = re.search(r"archive\.org/details/([^/\s]+)", value)
-        if match:
-            return match.group(1)
+        identifier = IAInteractGUI._extract_identifier_from_archive_url(value)
+        if identifier:
+            return identifier
 
         if "/" not in value and " " not in value:
             return value
@@ -346,16 +371,18 @@ class IAInteractGUI(tk.Tk):
         if not identifier:
             messagebox.showerror("Invalid repository", "Enter a valid archive.org/details/<identifier> link or identifier.")
             return
-
-        self.current_identifier = identifier
         self.append_status(f"Loading repository files for '{identifier}'...")
 
         def worker():
             files, error = self.fetch_repository_files(identifier)
             if error:
+                self.remote_listbox.after(0, lambda: self._set_remote_files([]))
                 self.append_status(error)
                 return
-            self.remote_listbox.after(0, lambda: self._set_remote_files(files))
+            def set_files():
+                self.current_identifier = identifier
+                self._set_remote_files(files)
+            self.remote_listbox.after(0, set_files)
             self.append_status(f"Loaded {len(files)} file(s) from '{identifier}'.")
 
         threading.Thread(target=worker, daemon=True).start()
@@ -389,16 +416,21 @@ class IAInteractGUI(tk.Tk):
         return files, None
 
     def upload_selected_local_files(self):
-        if not self.current_identifier:
-            messagebox.showerror("Repository not loaded", "Load repository files first so the target identifier is known.")
+        repo_identifier = self.extract_repo_identifier(self.repo_var.get().strip())
+        identifier = repo_identifier or self.current_identifier
+        if not identifier:
+            messagebox.showerror("Repository missing", "Enter a valid repository link or identifier first.")
             return
+
+        if identifier != self.current_identifier:
+            self.current_identifier = identifier
+            self.append_status(f"Using repository '{identifier}' for upload.")
         if not self.local_files:
             messagebox.showerror("No files selected", "Add one or more local files to upload.")
             return
 
         target_directory = self.target_directory_var.get().strip().strip("/")
         files_to_upload = list(self.local_files)
-        identifier = self.current_identifier
 
         self.append_status(
             f"Starting upload of {len(files_to_upload)} file(s) to '{identifier}' "
@@ -442,8 +474,20 @@ class IAInteractGUI(tk.Tk):
         return True, f"Uploaded: {file_path}"
 
     def download_selected_repository_files(self):
-        if not self.current_identifier:
+        repo_identifier = self.extract_repo_identifier(self.repo_var.get().strip())
+        if repo_identifier and self.current_identifier and repo_identifier != self.current_identifier:
+            messagebox.showerror(
+                "Repository changed",
+                "Repository field changed since files were loaded. Click 'Load Repository Files' to refresh list before downloading.",
+            )
+            return
+
+        identifier = self.current_identifier or repo_identifier
+        if not identifier:
             messagebox.showerror("Repository not loaded", "Load repository files first.")
+            return
+        if not self.remote_files:
+            messagebox.showerror("No repository files loaded", "Load repository files first.")
             return
 
         selected_indices = list(self.remote_listbox.curselection())
@@ -456,7 +500,6 @@ class IAInteractGUI(tk.Tk):
             return
 
         selected_files = [self.remote_files[index] for index in selected_indices]
-        identifier = self.current_identifier
         self.append_status(f"Starting download of {len(selected_files)} file(s) to '{destination_dir}'.")
 
         def worker():
