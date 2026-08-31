@@ -21,6 +21,8 @@ Use this script to list files, upload files, download files, delete files, move 
     - [6. GitHub Actions: Portable Releases](#6-github-actions-portable-releases)
     - [7. Windows Python Mode Notes (from issue #1)](#7-windows-python-mode-notes-from-issue-1)
     - [8. GUI Mode (Login + File Selection)](#8-gui-mode-login--file-selection)
+    - [9. Account Profiles (S3 key manager)](#9-account-profiles-s3-key-manager)
+    - [10. Progress Readout](#10-progress-readout)
 - [Usage](#usage)
 - [Running the Script](#running-the-script)
     - [Script Options](#script-options)
@@ -251,6 +253,23 @@ GUI flow:
 5. Set target upload directory and run upload/download actions.
    - Upload can start directly from a valid repository field value.
    - Download requires a loaded repository file list.
+
+### 9. Account Profiles (S3 key manager)
+
+The GUI can save named S3 account profiles so you do not have to re-enter keys each session.
+
+- On the login screen, the **Saved Profile** dropdown lists profiles stored locally; selecting one fills in the keys. **Manage** opens the Account Manager to add, edit, or remove profiles.
+- On the main screen, the **Accounts** button opens the Account Manager in switch mode; choosing a profile and clicking **Use** switches the active account live (no restart needed).
+- In the Account Manager, fields are Profile name, S3 access key, S3 secret key (masked, with a **Show** toggle), and optional Notes. Duplicate names and empty key fields are rejected.
+- Profiles are stored in `~/.config/ia-interact/accounts.json` (or `$XDG_CONFIG_HOME/ia-interact/accounts.json`) with `0600` permissions; the directory is `0700`.
+- Keys are stored in plaintext. Rely on home-directory / full-disk encryption for protection at rest, and do not store keys on shared machines.
+
+### 10. Progress Readout
+
+The GUI shows a live progress readout for uploads and downloads:
+
+- A progress bar and label show the current file index (`i/N`), filename, bytes transferred / total, percentage, and speed (bytes/s). For uploads, bytes are counted as the file is streamed to the S3 endpoint; for downloads, per chunk.
+- **Cancel** stops the transfer: an in-progress download stops after the current chunk; the in-flight upload finishes, then remaining queued files are skipped. Action buttons are disabled while a transfer is running and re-enabled when it completes or is cancelled.
 
 
 # Usage

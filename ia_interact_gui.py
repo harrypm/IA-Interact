@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import threading
+import time
 from urllib.parse import quote, urlparse
 try:
     import requests
@@ -18,6 +19,102 @@ except ModuleNotFoundError as e:
         "Install tkinter support (for example: sudo apt install python3-tk) "
         "or run this script with a Python build that includes Tk support."
     ) from e
+
+try:
+    from ia_accounts import AccountStore
+except Exception:
+    AccountStore = None
+
+
+def _fmt_bytes(n):
+    if n is None:
+        return "?"
+    if n < 1024:
+        return f"{n} B"
+    value = float(n)
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        value /= 1024.0
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} PiB"
+
+
+class ProgressFileWrapper:
+    """Wraps an open binary file so requests streams the upload while we count bytes."""
+
+    def __init__(self, file_obj, on_read):
+        self._file = file_obj
+        self._on_read = on_read
+
+    def read(self, amt=-1):
+        data = self._file.read(amt)
+        if data:
+            self._on_read(len(data))
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self._file, name)
+
+
+class _ProgressReporter:
+    """Thread-side progress bridge: funnels updates to the Tk thread via after()."""
+
+    def __init__(self, gui, total_files, kind):
+        self.gui = gui
+        self.total_files = total_files
+        self.kind = kind
+        self.file_index = 0
+        self.file_name = ""
+        self.total_bytes = 0
+        self.transferred = 0
+        self._last_ui = 0.0
+        self._file_start = 0.0
+
+    def start_file(self, index, name, total_bytes):
+        self.file_index = index
+        self.file_name = name
+        self.total_bytes = total_bytes or 0
+        self.transferred = 0
+        self._file_start = time.time()
+        self._sync(True)
+
+    def add_bytes(self, n):
+        self.transferred += n
+        now = time.time()
+        if now - self._last_ui >= 0.1:
+            self._last_ui = now
+            self._sync(False)
+
+    def finish_file(self):
+        self._sync(True)
+
+    def idle(self, text="Idle"):
+        def _do():
+            self.gui.progress_bar.configure(value=0)
+            self.gui.progress_label.configure(text=text)
+        self.gui.after(0, _do)
+
+    def _sync(self, force):
+        total = self.total_bytes
+        transferred = self.transferred
+        pct = min(100.0, transferred / total * 100.0) if total > 0 else 0.0
+        elapsed = time.time() - self._file_start
+        speed = transferred / elapsed if elapsed > 0 else 0.0
+        index = self.file_index
+        total_files = self.total_files
+        name = self.file_name
+        kind = self.kind
+
+        def _do():
+            self.gui.progress_bar.configure(value=pct)
+            self.gui.progress_label.configure(
+                text=(
+                    f"{kind.capitalize()} {index}/{total_files}: {name}  "
+                    f"{_fmt_bytes(transferred)} / {_fmt_bytes(total)} ({pct:.1f}%)  "
+                    f"{_fmt_bytes(speed)}/s"
+                )
+            )
+        self.gui.after(0, _do)
 
 
 class IAInteractGUI(tk.Tk):
@@ -58,6 +155,23 @@ class IAInteractGUI(tk.Tk):
         self.remote_listbox = None
         self.local_listbox = None
         self.status_text = None
+
+        self.account_store = AccountStore() if AccountStore is not None else None
+        if self.account_store is not None:
+            try:
+                self.account_store.load()
+            except Exception:
+                pass
+        self.current_profile = None
+
+        self.cancel_event = threading.Event()
+        self.profile_combobox = None
+        self.current_profile_label = None
+        self.progress_bar = None
+        self.progress_label = None
+        self.cancel_transfer_button = None
+        self.upload_button = None
+        self.download_button = None
 
         self._build_login_screen()
 
@@ -206,14 +320,43 @@ class IAInteractGUI(tk.Tk):
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 16)
         )
 
-        ttk.Label(card, text="S3 Access Key", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 8))
-        ttk.Entry(card, textvariable=self.access_key_var, width=56).grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        profile_row = 1
+        if self.account_store is not None:
+            ttk.Label(card, text="Saved Profile", style="Card.TLabel").grid(
+                row=profile_row, column=0, sticky="w", pady=(0, 8)
+            )
+            profile_combo_frame = ttk.Frame(card, style="Card.TFrame")
+            profile_combo_frame.grid(row=profile_row, column=1, sticky="ew", pady=(0, 8))
+            self.profile_combobox = ttk.Combobox(
+                profile_combo_frame, values=[], state="readonly", width=46
+            )
+            self.profile_combobox.pack(side="left", fill="x", expand=True)
+            self.profile_combobox.bind("<<ComboboxSelected>>", self._on_profile_selected)
+            ttk.Button(
+                profile_combo_frame, text="Manage", command=self._open_login_account_manager, width=10
+            ).pack(side="left", padx=(8, 0))
+            profile_row += 1
 
-        ttk.Label(card, text="S3 Secret Key", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 16))
-        ttk.Entry(card, textvariable=self.secret_key_var, show="*", width=56).grid(row=2, column=1, sticky="ew", pady=(0, 16))
+        ttk.Label(card, text="S3 Access Key", style="Card.TLabel").grid(row=profile_row, column=0, sticky="w", pady=(0, 8))
+        ttk.Entry(card, textvariable=self.access_key_var, width=56).grid(row=profile_row, column=1, sticky="ew", pady=(0, 8))
+        profile_row += 1
 
-        ttk.Button(card, text="Login", command=self._handle_login, style="Accent.TButton").grid(row=3, column=0, columnspan=2, sticky="ew")
+        ttk.Label(card, text="S3 Secret Key", style="Card.TLabel").grid(row=profile_row, column=0, sticky="w", pady=(0, 16))
+        ttk.Entry(card, textvariable=self.secret_key_var, show="*", width=56).grid(row=profile_row, column=1, sticky="ew", pady=(0, 16))
+        profile_row += 1
+
+        ttk.Button(card, text="Login", command=self._handle_login, style="Accent.TButton").grid(row=profile_row, column=0, columnspan=2, sticky="ew")
         card.columnconfigure(1, weight=1)
+
+        if self.account_store is not None:
+            self._refresh_login_profiles()
+            try:
+                active = self.account_store.get_active()
+            except Exception:
+                active = None
+            if active:
+                self.profile_combobox.set(active)
+                self._on_profile_selected()
 
     def _handle_login(self):
         access_key = self.access_key_var.get().strip()
@@ -229,13 +372,39 @@ class IAInteractGUI(tk.Tk):
         os.environ["S3_ACCESS_KEY"] = access_key
         os.environ["S3_SECRET_KEY"] = secret_key
 
+        selected = ""
+        if self.profile_combobox is not None:
+            selected = (self.profile_combobox.get() or "").strip()
+        if selected and self.account_store is not None:
+            try:
+                if self.account_store.get_profile(selected):
+                    self.account_store.set_active(selected)
+                    self.current_profile = selected
+            except Exception:
+                pass
+
         self.login_frame.destroy()
         self._build_main_screen()
         self.append_status("Login complete. Credentials loaded for this session.")
+        if self.current_profile:
+            self.append_status(f"Active account profile: {self.current_profile}")
 
     def _build_main_screen(self):
         self.main_frame = ttk.Frame(self, padding=12, style="TFrame")
         self.main_frame.pack(fill="both", expand=True)
+
+        account_bar = ttk.Frame(self.main_frame, style="TFrame")
+        account_bar.pack(fill="x", pady=(0, 8))
+        self.current_profile_label = ttk.Label(
+            account_bar,
+            text=f"Account: {self.current_profile or 'Manual (no profile)'}",
+            style="TLabel",
+        )
+        self.current_profile_label.pack(side="left")
+        if self.account_store is not None:
+            ttk.Button(
+                account_bar, text="Accounts", command=self._open_main_account_manager
+            ).pack(side="right")
 
         repo_frame = ttk.LabelFrame(self.main_frame, text="Repository", padding=10, style="Card.TLabelframe")
         repo_frame.pack(fill="x")
@@ -301,10 +470,23 @@ class IAInteractGUI(tk.Tk):
         action_frame.columnconfigure(1, weight=1)
         ttk.Label(action_frame, text="Target upload directory", style="Card.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(action_frame, textvariable=self.target_directory_var).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(action_frame, text="Upload Selected Local Files", command=self.upload_selected_local_files, style="Accent.TButton").grid(row=0, column=2, sticky="ew")
-        ttk.Button(action_frame, text="Download Selected Repository Files", command=self.download_selected_repository_files, style="Accent.TButton").grid(
-            row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0)
+        self.upload_button = ttk.Button(action_frame, text="Upload Selected Local Files", command=self.upload_selected_local_files, style="Accent.TButton")
+        self.upload_button.grid(row=0, column=2, sticky="ew")
+        self.download_button = ttk.Button(action_frame, text="Download Selected Repository Files", command=self.download_selected_repository_files, style="Accent.TButton")
+        self.download_button.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        progress_frame = ttk.LabelFrame(self.main_frame, text="Progress", padding=8, style="Card.TLabelframe")
+        progress_frame.pack(fill="x", pady=(8, 0))
+        progress_frame.columnconfigure(0, weight=1)
+
+        self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
+        self.progress_bar.grid(row=0, column=0, sticky="ew")
+        self.cancel_transfer_button = ttk.Button(
+            progress_frame, text="Cancel", command=self._cancel_transfer, state="disabled", width=10
         )
+        self.cancel_transfer_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.progress_label = ttk.Label(progress_frame, text="Idle", style="Card.TLabel")
+        self.progress_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         status_frame = ttk.LabelFrame(self.main_frame, text="Status", padding=8, style="Card.TLabelframe")
         status_frame.pack(fill="both", expand=True, pady=(8, 0))
@@ -325,6 +507,104 @@ class IAInteractGUI(tk.Tk):
         if self.status_text is None:
             return
         self.status_text.after(0, _append)
+
+    def _set_transfer_running(self, running):
+        def _do():
+            if self.upload_button is not None:
+                self.upload_button.configure(state="normal" if not running else "disabled")
+            if self.download_button is not None:
+                self.download_button.configure(state="normal" if not running else "disabled")
+            if self.cancel_transfer_button is not None:
+                self.cancel_transfer_button.configure(state="normal" if running else "disabled")
+        self.after(0, _do)
+
+    def _cancel_transfer(self):
+        self.cancel_event.set()
+        self.append_status("Cancel requested; finishing current operation...")
+
+    def _refresh_login_profiles(self):
+        if self.profile_combobox is None or self.account_store is None:
+            return
+        try:
+            names = self.account_store.list_names()
+        except Exception:
+            names = []
+        self.profile_combobox["values"] = names
+        current = (self.profile_combobox.get() or "").strip()
+        if current and current not in names:
+            self.profile_combobox.set("")
+
+    def _on_profile_selected(self, event=None):
+        if self.profile_combobox is None or self.account_store is None:
+            return
+        name = (self.profile_combobox.get() or "").strip()
+        if not name:
+            return
+        try:
+            profile = self.account_store.get_profile(name)
+        except Exception:
+            profile = None
+        if profile:
+            self.access_key_var.set(profile.get("access_key", ""))
+            self.secret_key_var.set(profile.get("secret_key", ""))
+
+    def _refresh_profile_label(self):
+        if self.current_profile_label is None:
+            return
+        name = self.current_profile or "Manual (no profile)"
+        self.current_profile_label.configure(text=f"Account: {name}")
+
+    def _refresh_account_ui(self):
+        self._refresh_login_profiles()
+        self._refresh_profile_label()
+
+    def _open_login_account_manager(self):
+        if self.account_store is None:
+            return
+        AccountManagerDialog(
+            self,
+            self.account_store,
+            on_change=self._refresh_account_ui,
+            mode="manage",
+            switch_callback=None,
+        )
+
+    def _open_main_account_manager(self):
+        if self.account_store is None:
+            return
+        AccountManagerDialog(
+            self,
+            self.account_store,
+            on_change=self._refresh_account_ui,
+            mode="switch",
+            switch_callback=self._switch_account_from_dialog,
+        )
+
+    def _switch_account_from_dialog(self, name):
+        return self._apply_account(name)
+
+    def _apply_account(self, profile_name):
+        if self.account_store is None:
+            return False
+        try:
+            profile = self.account_store.get_profile(profile_name)
+        except Exception:
+            profile = None
+        if not profile:
+            messagebox.showerror("Account", f"Profile '{profile_name}' not found.")
+            return False
+        self.access_key = profile.get("access_key", "")
+        self.secret_key = profile.get("secret_key", "")
+        os.environ["S3_ACCESS_KEY"] = self.access_key
+        os.environ["S3_SECRET_KEY"] = self.secret_key
+        self.current_profile = profile_name
+        try:
+            self.account_store.set_active(profile_name)
+        except Exception:
+            pass
+        self._refresh_profile_label()
+        self.append_status(f"Switched to account '{profile_name}'.")
+        return True
 
     def _set_remote_files(self, files):
         self.remote_files = files
@@ -438,17 +718,28 @@ class IAInteractGUI(tk.Tk):
         )
 
         def worker():
+            reporter = _ProgressReporter(self, len(files_to_upload), "upload")
             success_count = 0
-            for file_path in files_to_upload:
-                ok, detail = self.upload_single_file(identifier, file_path, target_directory)
+            for index, file_path in enumerate(files_to_upload, start=1):
+                if self.cancel_event.is_set():
+                    self.append_status("Upload cancelled by user.")
+                    break
+                ok, detail = self.upload_single_file(identifier, file_path, target_directory, reporter, index)
                 self.append_status(detail)
+                reporter.finish_file()
                 if ok:
                     success_count += 1
-            self.append_status(f"Upload complete: {success_count}/{len(files_to_upload)} succeeded.")
+            cancelled = self.cancel_event.is_set()
+            self._set_transfer_running(False)
+            if not cancelled:
+                self.append_status(f"Upload complete: {success_count}/{len(files_to_upload)} succeeded.")
+            reporter.idle("Cancelled" if cancelled else "Idle")
 
+        self.cancel_event.clear()
+        self._set_transfer_running(True)
         threading.Thread(target=worker, daemon=True).start()
 
-    def upload_single_file(self, identifier, file_path, directory):
+    def upload_single_file(self, identifier, file_path, directory, reporter=None, file_index=1):
         if not os.path.isfile(file_path):
             return False, f"Skipped missing file: {file_path}"
 
@@ -461,8 +752,19 @@ class IAInteractGUI(tk.Tk):
         }
 
         try:
+            total = os.path.getsize(file_path)
+        except OSError:
+            total = 0
+        if reporter is not None:
+            reporter.start_file(file_index, object_name, total)
+
+        try:
             with open(file_path, "rb") as file_data:
-                response = requests.put(upload_url, headers=headers, data=file_data, timeout=(60, 600))
+                if reporter is not None:
+                    body = ProgressFileWrapper(file_data, reporter.add_bytes)
+                else:
+                    body = file_data
+                response = requests.put(upload_url, headers=headers, data=body, timeout=(60, 600))
         except requests.RequestException as e:
             return False, f"Upload failed for '{file_path}': {e}"
         except OSError as e:
@@ -503,24 +805,36 @@ class IAInteractGUI(tk.Tk):
         self.append_status(f"Starting download of {len(selected_files)} file(s) to '{destination_dir}'.")
 
         def worker():
+            reporter = _ProgressReporter(self, len(selected_files), "download")
             success_count = 0
-            for file_name in selected_files:
-                ok, detail = self.download_single_file(identifier, file_name, destination_dir)
+            for index, file_name in enumerate(selected_files, start=1):
+                if self.cancel_event.is_set():
+                    self.append_status("Download cancelled by user.")
+                    break
+                ok, detail = self.download_single_file(identifier, file_name, destination_dir, reporter, index)
                 self.append_status(detail)
+                reporter.finish_file()
                 if ok:
                     success_count += 1
-            self.append_status(f"Download complete: {success_count}/{len(selected_files)} succeeded.")
+            cancelled = self.cancel_event.is_set()
+            self._set_transfer_running(False)
+            if not cancelled:
+                self.append_status(f"Download complete: {success_count}/{len(selected_files)} succeeded.")
+            reporter.idle("Cancelled" if cancelled else "Idle")
 
+        self.cancel_event.clear()
+        self._set_transfer_running(True)
         threading.Thread(target=worker, daemon=True).start()
 
-    @staticmethod
-    def download_single_file(identifier, file_name, destination_dir):
+    def download_single_file(self, identifier, file_name, destination_dir, reporter=None, file_index=1):
         safe_relative_path = os.path.normpath(file_name).lstrip("/\\")
         if safe_relative_path.startswith(".."):
             return False, f"Skipped unsafe file path: {file_name}"
 
         output_path = os.path.join(destination_dir, safe_relative_path)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
         download_url = f"https://archive.org/download/{identifier}/{quote(file_name, safe='/')}"
         try:
@@ -532,15 +846,261 @@ class IAInteractGUI(tk.Tk):
             return False, f"Download failed for '{file_name}': {response.status_code} {response.reason}"
 
         try:
+            total_header = response.headers.get("content-length")
+            total = int(total_header) if total_header else 0
+        except (TypeError, ValueError):
+            total = 0
+        if reporter is not None:
+            reporter.start_file(file_index, os.path.basename(file_name), total)
+
+        cancelled = False
+        try:
             with open(output_path, "wb") as output_file:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if not chunk:
                         continue
                     output_file.write(chunk)
+                    if reporter is not None:
+                        reporter.add_bytes(len(chunk))
+                    if self.cancel_event.is_set():
+                        cancelled = True
+                        break
         except OSError as e:
             return False, f"Download failed writing '{output_path}': {e}"
 
+        if cancelled:
+            return False, f"Download cancelled: {file_name}"
+
         return True, f"Downloaded: {output_path}"
+
+
+class AccountManagerDialog(tk.Toplevel):
+    """Dialog to add/edit/remove saved S3 profiles, and (in switch mode) pick one to use."""
+
+    def __init__(self, parent, store, on_change=None, mode="manage", switch_callback=None):
+        super().__init__(parent)
+        self.store = store
+        self.on_change = on_change
+        self.mode = mode
+        self.switch_callback = switch_callback
+        self.selected_name = None
+
+        self.title("Account Manager")
+        self.geometry("660x470")
+        self.minsize(580, 400)
+        self.configure(bg=IAInteractGUI.COLOR_BG)
+        self.transient(parent)
+
+        self.name_var = tk.StringVar()
+        self.access_var = tk.StringVar()
+        self.secret_var = tk.StringVar()
+        self.notes_var = tk.StringVar()
+        self.show_secret_var = tk.BooleanVar(value=False)
+
+        self._build_ui()
+        self._refresh_list()
+        self.grab_set()
+        self.focus_set()
+
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=12, style="TFrame")
+        root.pack(fill="both", expand=True)
+
+        list_frame = ttk.LabelFrame(root, text="Saved Profiles", padding=8, style="Card.TLabelframe")
+        list_frame.pack(fill="both", expand=True)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        self.profile_listbox = tk.Listbox(list_frame, height=8, activestyle="none")
+        self._apply_listbox_theme(self.profile_listbox)
+        list_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.profile_listbox.yview)
+        self.profile_listbox.configure(yscrollcommand=list_scroll.set)
+        self.profile_listbox.grid(row=0, column=0, sticky="nsew")
+        list_scroll.grid(row=0, column=1, sticky="ns")
+        self.profile_listbox.bind("<<ListboxSelect>>", self._on_list_select)
+        self.profile_listbox.bind("<Double-Button-1>", self._on_list_double)
+
+        form_frame = ttk.LabelFrame(root, text="Profile Details", padding=8, style="Card.TLabelframe")
+        form_frame.pack(fill="x", pady=(8, 0))
+        form_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(form_frame, text="Profile name", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(form_frame, textvariable=self.name_var).grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 6))
+
+        ttk.Label(form_frame, text="S3 access key", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(form_frame, textvariable=self.access_var).grid(row=1, column=1, columnspan=2, sticky="ew", pady=(0, 6))
+
+        ttk.Label(form_frame, text="S3 secret key", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        self._secret_entry = ttk.Entry(form_frame, textvariable=self.secret_var, show="*")
+        self._secret_entry.grid(row=2, column=1, sticky="ew", pady=(0, 6))
+        ttk.Checkbutton(form_frame, text="Show", variable=self.show_secret_var, command=self._toggle_secret).grid(
+            row=2, column=2, padx=(8, 0), pady=(0, 6)
+        )
+
+        ttk.Label(form_frame, text="Notes", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(form_frame, textvariable=self.notes_var).grid(row=3, column=1, columnspan=2, sticky="ew", pady=(0, 6))
+
+        button_frame = ttk.Frame(root, style="TFrame")
+        button_frame.pack(fill="x", pady=(8, 0))
+        ttk.Button(button_frame, text="Add", command=self._add).pack(side="left")
+        ttk.Button(button_frame, text="Update", command=self._update).pack(side="left", padx=8)
+        ttk.Button(button_frame, text="Remove", command=self._remove).pack(side="left")
+        if self.mode == "switch" and self.switch_callback is not None:
+            ttk.Button(button_frame, text="Use", command=self._use, style="Accent.TButton").pack(side="right")
+        ttk.Button(button_frame, text="Close", command=self._close).pack(side="right")
+
+    @staticmethod
+    def _apply_listbox_theme(widget):
+        widget.configure(
+            bg=IAInteractGUI.COLOR_ENTRY,
+            fg=IAInteractGUI.COLOR_TEXT,
+            selectbackground=IAInteractGUI.COLOR_SELECTION_BG,
+            selectforeground=IAInteractGUI.COLOR_SELECTION_FG,
+            highlightthickness=1,
+            highlightbackground=IAInteractGUI.COLOR_BORDER,
+            highlightcolor=IAInteractGUI.COLOR_ACCENT,
+            borderwidth=0,
+            relief="flat",
+        )
+
+    def _toggle_secret(self):
+        self._secret_entry.configure(show="" if self.show_secret_var.get() else "*")
+
+    def _refresh_list(self):
+        self.profile_listbox.delete(0, "end")
+        try:
+            names = self.store.list_names()
+        except Exception:
+            names = []
+        for name in names:
+            self.profile_listbox.insert("end", name)
+
+    def _notify_change(self):
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                pass
+
+    def _on_list_select(self, event=None):
+        selection = self.profile_listbox.curselection()
+        if not selection:
+            return
+        name = self.profile_listbox.get(selection[0])
+        self.selected_name = name
+        try:
+            profile = self.store.get_profile(name)
+        except Exception:
+            profile = None
+        if profile:
+            self.name_var.set(profile.get("name", ""))
+            self.access_var.set(profile.get("access_key", ""))
+            self.secret_var.set(profile.get("secret_key", ""))
+            self.notes_var.set(profile.get("notes", ""))
+
+    def _on_list_double(self, event=None):
+        if self.mode == "switch" and self.switch_callback is not None:
+            self._use()
+
+    def _clear_form(self):
+        self.name_var.set("")
+        self.access_var.set("")
+        self.secret_var.set("")
+        self.notes_var.set("")
+        self.selected_name = None
+
+    def _add(self):
+        name = self.name_var.get().strip()
+        access = self.access_var.get().strip()
+        secret = self.secret_var.get().strip()
+        notes = self.notes_var.get().strip()
+        if not name or not access or not secret:
+            messagebox.showerror("Missing fields", "Profile name, access key, and secret key are required.")
+            return
+        try:
+            self.store.add_profile(name, access, secret, notes)
+        except Exception as exc:
+            messagebox.showerror("Add failed", str(exc))
+            return
+        self._refresh_list()
+        self._notify_change()
+        self._clear_form()
+        self._log(f"Added profile '{name}'.")
+
+    def _update(self):
+        if not self.selected_name:
+            messagebox.showerror("No selection", "Select a profile from the list to update.")
+            return
+        name = self.name_var.get().strip()
+        access = self.access_var.get().strip()
+        secret = self.secret_var.get().strip()
+        notes = self.notes_var.get().strip()
+        if not name or not access or not secret:
+            messagebox.showerror("Missing fields", "Profile name, access key, and secret key are required.")
+            return
+        rename = name if name != self.selected_name else None
+        try:
+            self.store.update_profile(
+                self.selected_name,
+                access_key=access,
+                secret_key=secret,
+                notes=notes,
+                rename=rename,
+            )
+        except Exception as exc:
+            messagebox.showerror("Update failed", str(exc))
+            return
+        self.selected_name = name
+        self._refresh_list()
+        self._notify_change()
+        self._log(f"Updated profile '{name}'.")
+
+    def _remove(self):
+        selection = self.profile_listbox.curselection()
+        if not selection:
+            messagebox.showerror("No selection", "Select a profile from the list to remove.")
+            return
+        name = self.profile_listbox.get(selection[0])
+        if not messagebox.askyesno("Remove profile", f"Remove profile '{name}'? This cannot be undone."):
+            return
+        try:
+            self.store.remove_profile(name)
+        except Exception as exc:
+            messagebox.showerror("Remove failed", str(exc))
+            return
+        if self.selected_name == name:
+            self._clear_form()
+        self._refresh_list()
+        self._notify_change()
+        self._log(f"Removed profile '{name}'.")
+
+    def _use(self):
+        selection = self.profile_listbox.curselection()
+        name = None
+        if selection:
+            name = self.profile_listbox.get(selection[0])
+        elif self.selected_name:
+            name = self.selected_name
+        if not name:
+            messagebox.showerror("No selection", "Select a profile to use.")
+            return
+        if self.switch_callback is None:
+            return
+        try:
+            ok = self.switch_callback(name)
+        except Exception as exc:
+            messagebox.showerror("Switch failed", str(exc))
+            return
+        if ok:
+            self.destroy()
+
+    def _close(self):
+        self.destroy()
+
+    def _log(self, message):
+        parent = self.master
+        if isinstance(parent, IAInteractGUI):
+            parent.append_status(message)
 
 
 def main():

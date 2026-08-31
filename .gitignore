@@ -8,3 +8,6 @@ dist/
 release/
 AppDir/
 appimagetool-*.AppImage
+
+# Prompt log
+PROMPT_README.md
