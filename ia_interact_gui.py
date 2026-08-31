@@ -899,8 +899,18 @@ class AccountManagerDialog(tk.Toplevel):
 
         self._build_ui()
         self._refresh_list()
-        self.grab_set()
-        self.focus_set()
+        try:
+            self.wait_visibility()
+        except tk.TclError:
+            pass
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=12, style="TFrame")
