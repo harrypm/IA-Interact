@@ -1,0 +1,178 @@
+name: Release
+
+# Manual release cutter. Adds a "Run workflow" button to the Actions tab.
+# Pick a bump level (patch/minor/major) OR an explicit release_tag, then this
+# workflow: bumps version.py -> commits -> tags vX.Y.Z -> builds all portable
+# binaries via build-binaries.yml -> publishes a GitHub Release with the assets.
+#
+# Uses only the default GITHUB_TOKEN (no PAT). A GITHUB_TOKEN push does not
+# trigger other workflows, which is fine here because the build and publish
+# jobs run inside this same workflow run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Bump level (ignored when release_tag is given)"
+        required: false
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      release_tag:
+        description: "Explicit release tag, e.g. v1.2.0. Overrides bump. Must match ^vX.Y.Z$."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a pre-release"
+        required: false
+        type: boolean
+        default: false
+      make_latest:
+        description: "Mark the GitHub Release as the 'latest' release"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  cut-release:
+    name: Cut release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.cut.outputs.tag }}
+      version: ${{ steps.cut.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve, bump, commit, and push the release tag
+        id: cut
+        env:
+          BUMP: ${{ inputs.bump }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          tag_regex='^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+          if [ -n "${RELEASE_TAG_INPUT}" ]; then
+            TAG="${RELEASE_TAG_INPUT}"
+          else
+            latest_tag="$(git tag -l 'v*' --sort=-v:refname | head -n 1 || true)"
+            if [ -z "${latest_tag}" ]; then
+              echo "ERROR: no existing v* tag to bump and no release_tag given. Set release_tag=vX.Y.Z." >&2
+              exit 1
+            fi
+            base="${latest_tag#v}"
+            major="${base%%.*}"
+            rest="${base#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+            case "${BUMP}" in
+              major)   major=$((major + 1)); minor=0; patch=0 ;;
+              minor)   minor=$((minor + 1)); patch=0 ;;
+              patch|*) patch=$((patch + 1)) ;;
+            esac
+            TAG="v${major}.${minor}.${patch}"
+          fi
+
+          if ! echo "${TAG}" | grep -Eq "${tag_regex}"; then
+            echo "ERROR: resolved tag '${TAG}' does not match ${tag_regex}" >&2
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "ERROR: tag '${TAG}' already exists" >&2
+            exit 1
+          fi
+
+          version="${TAG#v}"
+
+          # Rewrite the single source of truth in version.py.
+          python3 - <<PY
+          import pathlib, re
+          path = pathlib.Path("version.py")
+          text = path.read_text(encoding="utf-8")
+          new = re.sub(
+              r'^__version__\s*=\s*"[^"]*"',
+              f'__version__ = "${version}"',
+              text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if new == text or '__version__' not in new:
+              raise SystemExit("version.py rewrite failed")
+          path.write_text(new, encoding="utf-8")
+          PY
+
+          git add version.py
+          git commit -m "Bump version to ${TAG}"
+
+          # Push the bump commit. Fails (non-fast-forward) if the branch moved
+          # since dispatch, so we never leave a dangling tag.
+          git push origin "HEAD:refs/heads/${BRANCH}"
+
+          git tag "${TAG}"
+          git push origin "${TAG}"
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Cut ${TAG} on ${BRANCH}"
+
+  build:
+    name: Build portable binaries
+    needs: cut-release
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      ref: ${{ needs.cut-release.outputs.tag }}
+    secrets: inherit
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - cut-release
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.cut-release.outputs.tag }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+
+      - name: Show release assets
+        run: find release-assets -type f -printf '%p\n' | sort
+
+      - name: Attach assets to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.cut-release.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: ${{ inputs.make_latest && 'true' || 'false' }}
+          files: |
+            release-assets/**/*.AppImage
+            release-assets/**/*.exe
+            release-assets/**/*.app.zip
+          fail_on_unmatched_files: true

@@ -2,6 +2,7 @@
 import os
 import threading
 import time
+import webbrowser
 from urllib.parse import quote, urlparse
 try:
     import requests
@@ -24,6 +25,16 @@ try:
     from ia_accounts import AccountStore
 except Exception:
     AccountStore = None
+
+try:
+    from version import __version__
+except Exception:
+    __version__ = "unknown"
+
+try:
+    import ia_update
+except Exception:
+    ia_update = None
 
 
 def _fmt_bytes(n):
@@ -133,7 +144,7 @@ class IAInteractGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self._configure_scaling()
-        self.title("IA Interact GUI")
+        self.title(f"IA Interact GUI v{__version__}")
         self.geometry("1040x740")
         self.minsize(940, 640)
         self._configure_dark_theme()
@@ -173,6 +184,12 @@ class IAInteractGUI(tk.Tk):
         self.upload_button = None
         self.download_button = None
 
+        self.update_store = ia_update.UpdateStore() if ia_update is not None else None
+        self._update_check_lock = threading.Lock()
+        self._update_check_running = False
+        self._update_check_pending = None
+
+        self._build_menu()
         self._build_login_screen()
 
     def _configure_scaling(self):
@@ -496,6 +513,152 @@ class IAInteractGUI(tk.Tk):
         self.status_text = ScrolledText(status_frame, height=10, wrap="word", state="disabled", padx=8, pady=8)
         self._apply_dark_text_widget_theme(self.status_text)
         self.status_text.grid(row=0, column=0, sticky="nsew")
+
+        # Defer the automatic background update check until the main screen
+        # (and its status log) exist so any "update available" notice has
+        # somewhere to land. Runs at most once every 7 days (see ia_update).
+        self.after(2000, self._maybe_auto_check)
+
+    def _build_menu(self):
+        menubar = tk.Menu(self, tearoff=0)
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Check for Updates...", command=self._open_update_dialog)
+        help_menu.add_separator()
+        help_menu.add_command(label="About IA Interact", command=self._open_about_dialog)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        self.configure(menu=menubar)
+
+    def _open_about_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("About IA Interact")
+        dialog.configure(bg=self.COLOR_BG)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        body = ttk.Frame(dialog, padding=20, style="TFrame")
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text="IA Interact", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(body, text=f"Version {__version__}", style="Card.TLabel").pack(anchor="w", pady=(4, 12))
+
+        repo_url = (
+            ia_update.RELEASES_LATEST_URL
+            if ia_update is not None
+            else "https://github.com/harrypm/IA-Interact"
+        )
+        info = (
+            "A small desktop client for interacting with Internet Archive\n"
+            "repositories (upload, download, list, delete, move).\n\n"
+            f"Source / releases:\n{repo_url}\n\n"
+            "S3 credentials are stored locally only; see README for details."
+        )
+        ttk.Label(body, text=info, style="Card.TLabel", justify="left").pack(anchor="w")
+
+        ttk.Button(body, text="Close", command=dialog.destroy, style="Accent.TButton").pack(anchor="e", pady=(16, 0))
+
+        try:
+            dialog.wait_visibility()
+        except tk.TclError:
+            pass
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            dialog.focus_set()
+        except tk.TclError:
+            pass
+
+    def _open_update_dialog(self):
+        UpdateDialog(self)
+
+    def _maybe_auto_check(self):
+        if ia_update is None or self.update_store is None:
+            return
+        try:
+            due = self.update_store.is_due()
+        except Exception:
+            due = False
+        if due:
+            self._run_update_check(manual=False)
+
+    @staticmethod
+    def _update_result_error(message):
+        return {"ok": False, "tag": "", "available": False, "cmp": None, "error": message}
+
+    def _run_update_check(self, manual, on_result=None):
+        """Run a single update check on a daemon thread.
+
+        Shared by the automatic background check (manual=False) and the Update
+        dialog (manual=True). Guarded so only one check runs at a time.
+
+        Thread safety: the worker thread NEVER touches Tk. It only computes the
+        result (ia_update.check_for_update) and stashes it in
+        ``self._update_check_pending`` under the lock. A main-thread poller
+        (``_poll_update_check``, scheduled via ``after`` from here) drains the
+        pending result and does all UI/store work on the Tk thread. This avoids
+        the ``RuntimeError: main thread is not in main loop`` that calling
+        ``after``/widget methods from a background thread can raise.
+        """
+        if ia_update is None or self.update_store is None:
+            if on_result is not None:
+                on_result(self._update_result_error("Update checker unavailable."))
+            return
+
+        with self._update_check_lock:
+            if self._update_check_running:
+                if on_result is not None:
+                    on_result(self._update_result_error("An update check is already running."))
+                return
+            self._update_check_running = True
+            self._update_check_pending = None
+
+        def worker():
+            result = ia_update.check_for_update(__version__)
+            with self._update_check_lock:
+                self._update_check_pending = (result, manual, on_result)
+                self._update_check_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(50, self._poll_update_check)
+
+    def _poll_update_check(self):
+        """Main-thread poller: drain a completed update check and finish it on the Tk thread."""
+        with self._update_check_lock:
+            pending = self._update_check_pending
+            self._update_check_pending = None
+            running = self._update_check_running
+        if pending is not None:
+            result, manual, on_result = pending
+            self._on_update_check_done(result, manual, on_result)
+            return
+        if running:
+            self.after(50, self._poll_update_check)
+
+    def _on_update_check_done(self, result, manual, on_result):
+        # Persist the result + cached availability on the Tk thread (no race with reads).
+        if result.get("ok") and self.update_store is not None:
+            try:
+                self.update_store.record(result["tag"], __version__)
+            except Exception:
+                pass
+        if on_result is not None:
+            try:
+                on_result(result)
+            except Exception:
+                pass
+        # Silent auto-check: only surface a notice when an update is actually
+        # available and the status log exists. Manual results are shown by the dialog.
+        if (
+            not manual
+            and self.status_text is not None
+            and result.get("ok")
+            and result.get("available")
+        ):
+            self.append_status(
+                f"Update available: {result['tag']} (current v{__version__}). "
+                "See Help > Check for Updates."
+            )
 
     def append_status(self, message):
         def _append():
@@ -1111,6 +1274,127 @@ class AccountManagerDialog(tk.Toplevel):
         parent = self.master
         if isinstance(parent, IAInteractGUI):
             parent.append_status(message)
+
+
+class UpdateDialog(tk.Toplevel):
+    """Dialog showing update status with Check Now / Download Latest / Close.
+
+    Opens with the cached last-check state, then kicks a fresh check if there
+    is no cached result yet. Mirrors MISRC-GUI's version-info update row.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("Check for Updates")
+        self.geometry("460x280")
+        self.minsize(400, 240)
+        self.configure(bg=IAInteractGUI.COLOR_BG)
+        self.transient(parent)
+
+        self._latest_tag = None
+
+        body = ttk.Frame(self, padding=16, style="TFrame")
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(body, text="Check for Updates", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(body, text=f"Installed version: v{__version__}", style="Card.TLabel").pack(anchor="w", pady=(4, 8))
+
+        self.status_label = ttk.Label(body, text="", style="Card.TLabel", wraplength=420, justify="left")
+        self.status_label.pack(anchor="w", fill="x", expand=True)
+
+        buttons = ttk.Frame(body, style="TFrame")
+        buttons.pack(fill="x", pady=(12, 0))
+        self.check_button = ttk.Button(buttons, text="Check Now", command=self._check_now, style="Accent.TButton")
+        self.check_button.pack(side="left")
+        self.download_button = ttk.Button(buttons, text="Download Latest", command=self._download_latest, state="disabled")
+        self.download_button.pack(side="left", padx=8)
+        ttk.Button(buttons, text="Close", command=self._close).pack(side="right")
+
+        self._show_cached_state()
+        # Auto-check on open only if we have no cached result yet.
+        parent_store = parent.update_store if isinstance(parent, IAInteractGUI) else None
+        if ia_update is None or parent_store is None or not parent_store.get_last_release_tag():
+            self.after(100, self._check_now)
+
+        try:
+            self.wait_visibility()
+        except tk.TclError:
+            pass
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
+
+    def _show_cached_state(self):
+        parent = self.parent
+        if ia_update is None or not isinstance(parent, IAInteractGUI) or parent.update_store is None:
+            self.status_label.configure(text="Update checker unavailable.")
+            return
+        tag = parent.update_store.get_last_release_tag()
+        if not tag:
+            self.status_label.configure(text="Not checked yet. Click \"Check Now\".")
+            return
+        self._latest_tag = tag
+        cmp = ia_update.compare_versions(__version__, tag)
+        if cmp < 0:
+            self.status_label.configure(text=f"Update available: {tag}\n(installed v{__version__}).")
+            self.download_button.configure(state="normal")
+        elif cmp == 0:
+            self.status_label.configure(text=f"You are up to date (latest {tag}).")
+            self.download_button.configure(state="disabled")
+        else:
+            self.status_label.configure(text=f"Running a newer build than the latest release ({tag}).")
+            self.download_button.configure(state="disabled")
+
+    def _check_now(self):
+        parent = self.parent
+        if not isinstance(parent, IAInteractGUI):
+            return
+        self.check_button.configure(state="disabled")
+        self.download_button.configure(state="disabled")
+        self.status_label.configure(text="Checking for updates...")
+        parent._run_update_check(manual=True, on_result=self._apply_result)
+
+    def _apply_result(self, result):
+        self.check_button.configure(state="normal")
+        if not result.get("ok"):
+            self.status_label.configure(text=f"Update check failed:\n{result.get('error') or 'unknown error'}")
+            self.download_button.configure(state="disabled")
+            return
+        tag = result.get("tag") or ""
+        self._latest_tag = tag or self._latest_tag
+        if result.get("available"):
+            self.status_label.configure(text=f"Update available: {tag}\n(installed v{__version__}).")
+            self.download_button.configure(state="normal")
+        elif result.get("cmp") == 0:
+            self.status_label.configure(text=f"You are up to date (latest {tag}).")
+            self.download_button.configure(state="disabled")
+        else:
+            self.status_label.configure(text=f"Running a newer build than the latest release ({tag}).")
+            self.download_button.configure(state="disabled")
+
+    def _download_latest(self):
+        tag = self._latest_tag
+        url = None
+        if tag and ia_update is not None:
+            url = ia_update.build_release_asset_url(tag)
+        if not url:
+            url = ia_update.RELEASES_LATEST_URL if ia_update is not None else None
+        if not url:
+            messagebox.showerror("Download", "No download URL available for this platform.")
+            return
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            messagebox.showerror("Download", f"Failed to open browser:\n{exc}")
+
+    def _close(self):
+        self.destroy()
 
 
 def main():

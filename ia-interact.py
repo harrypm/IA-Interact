@@ -7,6 +7,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import quote, urlparse
 
+from version import __version__
+
 
 def _extract_identifier_from_archive_url(value):
     candidate = value
@@ -537,6 +539,11 @@ def main():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="IA Interact CLI/GUI launcher")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"IA Interact {__version__}",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--gui",
