@@ -8,4 +8,4 @@ The value here carries NO leading 'v'; git release tags use the 'v' prefix
 (e.g. __version__ == "1.0.0" <-> git tag v1.0.0).
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
