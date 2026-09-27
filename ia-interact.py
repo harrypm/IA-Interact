@@ -557,11 +557,115 @@ def parse_args():
     )
     return parser.parse_args()
 
-def select_launch_mode(args):
+def _windows_launched_by_explorer():
+    """Best-effort: True on Windows when the parent process is explorer.exe.
+
+    A Windows console-subsystem executable (PyInstaller ``--onefile`` without
+    ``--windowed``) gets a freshly-allocated console when double-clicked in
+    Explorer, so ``sys.stdin.isatty()`` is True even though the user did NOT
+    open a terminal. That would otherwise make ``select_launch_mode`` pick the
+    CLI text menu instead of the GUI. Detecting an Explorer parent lets us
+    route double-clicks to the GUI.
+
+    Returns False on non-Windows platforms and on any error (safe fallback:
+    behave like a normal terminal launch).
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),  # ULONG_PTR
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.GetCurrentProcessId.argtypes = []
+        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            our_pid = kernel32.GetCurrentProcessId()
+            parent_pid = None
+            if kernel32.Process32FirstW(ctypes.byref(entry)):
+                while True:
+                    if entry.th32ProcessID == our_pid:
+                        parent_pid = entry.th32ParentProcessID
+                        break
+                    if not kernel32.Process32NextW(ctypes.byref(entry)):
+                        break
+            if parent_pid is None:
+                return False
+            parent_name = ""
+            if kernel32.Process32FirstW(ctypes.byref(entry)):
+                while True:
+                    if entry.th32ProcessID == parent_pid:
+                        parent_name = entry.szExeFile
+                        break
+                    if not kernel32.Process32NextW(ctypes.byref(entry)):
+                        break
+            return parent_name.lower() == "explorer.exe"
+        finally:
+            try:
+                kernel32.CloseHandle(snapshot)
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+
+def _windows_set_console_visible(visible):
+    """Hide or show this process's own console window on Windows (no-op elsewhere)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32.GetConsoleWindow.argtypes = []
+        kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+        user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        user32.ShowWindow.restype = ctypes.c_int
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            # SW_HIDE = 0, SW_SHOW = 5
+            user32.ShowWindow(hwnd, 5 if visible else 0)
+    except Exception:
+        pass
+
+
+def select_launch_mode(args, explorer_launch=False):
     if args.gui:
         return "gui"
     if args.cli:
         return "cli"
+
+    # A Windows console-exe double-clicked in Explorer gets an auto-allocated
+    # console (so isatty() is True), but the user clearly wants the GUI.
+    if explorer_launch:
+        return "gui"
 
     interactive_terminal = sys.stdin.isatty() and sys.stdout.isatty()
     if interactive_terminal:
@@ -580,8 +684,22 @@ def select_launch_mode(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    if select_launch_mode(args) == "gui":
-        from ia_interact_gui import main as gui_main
-        gui_main()
+    explorer_launch = _windows_launched_by_explorer()
+    if select_launch_mode(args, explorer_launch=explorer_launch) == "gui":
+        # Only hide the throwaway console for an Explorer (double-click) launch
+        # that auto-selected the GUI; never for an explicit --gui from a real
+        # terminal (that would yank the user's terminal window away).
+        hide_console = explorer_launch and not args.gui
+        if hide_console:
+            _windows_set_console_visible(False)
+        try:
+            from ia_interact_gui import main as gui_main
+            gui_main()
+        except Exception:
+            import traceback
+            if hide_console:
+                _windows_set_console_visible(True)
+            traceback.print_exc()
+            raise
     else:
         main()
