@@ -1,2 +1,4 @@
 requests>=2.31.0
 tqdm>=4.66.0
+# Optional at runtime: enables GUI drag & drop (the GUI degrades gracefully without it).
+tkinterdnd2>=0.6.0

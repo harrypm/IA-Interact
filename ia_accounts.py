@@ -77,6 +77,7 @@ class AccountStore:
                                 "access_key": profile.get("access_key", ""),
                                 "secret_key": profile.get("secret_key", ""),
                                 "notes": profile.get("notes", ""),
+                                "screenname": (profile.get("screenname") or ""),
                                 "created": profile.get("created", time.time()),
                             }
                         )
@@ -123,7 +124,7 @@ class AccountStore:
                 return dict(profile)
         return None
 
-    def add_profile(self, name, access_key, secret_key, notes=""):
+    def add_profile(self, name, access_key, secret_key, notes="", screenname=""):
         self._ensure_loaded()
         name = (name or "").strip()
         access_key = (access_key or "").strip()
@@ -140,12 +141,13 @@ class AccountStore:
                 "access_key": access_key,
                 "secret_key": secret_key,
                 "notes": (notes or "").strip(),
+                "screenname": (screenname or "").strip(),
                 "created": time.time(),
             }
         )
         self.save()
 
-    def update_profile(self, name, access_key=None, secret_key=None, notes=None, rename=None):
+    def update_profile(self, name, access_key=None, secret_key=None, notes=None, screenname=None, rename=None):
         self._ensure_loaded()
         index = self._find_index(name)
         if index < 0:
@@ -162,6 +164,8 @@ class AccountStore:
             profile["secret_key"] = secret_key.strip()
         if notes is not None:
             profile["notes"] = notes.strip()
+        if screenname is not None:
+            profile["screenname"] = screenname.strip()
         if self._data.get("active_profile") == name and new_name != name:
             self._data["active_profile"] = new_name
         self.save()

@@ -55,10 +55,93 @@ def get_repo_identifier(repo_link):
     print("Invalid Internet Archive URL. Please provide a valid link or identifier.")
     return None
 
-def upload_file_with_progress(identifier, file_path, directory):
+def collect_folder_files(folder_path):
+    """
+    Recursively collects files under folder_path.
+
+    Returns (entries, errors). Each entry is a dict with:
+      - "local_path": absolute path of the file on disk
+      - "rel": the file path relative to folder_path, using "/" separators
+        (the folder's own name is NOT included; callers prepend it if wanted).
+    errors is a list of (path, message) tuples for directories that could not
+    be read; the walk continues past them.
+    """
+    entries = []
+    errors = []
+
+    def on_error(err):
+        errors.append((getattr(err, "filename", None) or folder_path, str(err)))
+
+    for root, dirs, files in os.walk(folder_path, onerror=on_error):
+        dirs.sort()
+        for file_name in sorted(files):
+            file_path = os.path.join(root, file_name)
+            rel = os.path.relpath(file_path, folder_path).replace(os.sep, "/")
+            if not rel or rel == "." or rel.startswith("../"):
+                continue
+            entries.append({"local_path": os.path.abspath(file_path), "rel": rel})
+    return entries, errors
+
+def build_download_listing(file_paths):
+    """
+    Groups a flat "a/b/c" file list into directory-style rows for display.
+
+    Returns rows as dicts: {"type": "file"|"folder", "label", "depth", "path",
+    "file_indices"}. Folders are listed before files at each level, both
+    alphabetical; a folder row is followed by its own subtree, and carries the
+    flat indices of every file it contains so a whole folder can be selected.
+    """
+    root = {"dirs": {}, "files": []}
+    for index, path in enumerate(file_paths):
+        parts = [part for part in path.split("/") if part]
+        if not parts:
+            continue
+        node = root
+        for part in parts[:-1]:
+            node = node["dirs"].setdefault(part, {"dirs": {}, "files": []})
+        node["files"].append((index, path))
+
+    def build(node, depth, prefix):
+        rows = []
+        all_indices = []
+        for name in sorted(node["dirs"], key=str.lower):
+            child_path = f"{prefix}{name}/"
+            child_rows, child_indices = build(node["dirs"][name], depth + 1, child_path)
+            rows.append(
+                {
+                    "type": "folder",
+                    "label": f"{name}/",
+                    "depth": depth,
+                    "path": child_path,
+                    "file_indices": child_indices,
+                }
+            )
+            rows.extend(child_rows)
+            all_indices.extend(child_indices)
+        for index, path in sorted(node["files"], key=lambda item: item[1].lower()):
+            name = path.rsplit("/", 1)[-1]
+            rows.append(
+                {
+                    "type": "file",
+                    "label": name,
+                    "depth": depth,
+                    "path": path,
+                    "file_indices": [index],
+                }
+            )
+            all_indices.append(index)
+        return rows, all_indices
+
+    rows, _ = build(root, 0, "")
+    return rows
+
+def upload_file_with_progress(identifier, file_path, directory, object_name=None):
     """
     Uploads a file to Internet Archive with progress tracking and retry logic.
     Uses 2MB chunks and retries up to 5 times for transient errors.
+    object_name is the repository-side path for the upload ('/'-separated
+    subdirectories are allowed for folder uploads); it defaults to the file's
+    basename.
     """
     access_key = os.getenv("S3_ACCESS_KEY")
     secret_key = os.getenv("S3_SECRET_KEY")
@@ -66,7 +149,9 @@ def upload_file_with_progress(identifier, file_path, directory):
         print("S3 access key or secret key is missing. Please set them as environment variables.")
         return False
 
-    upload_url = f"https://s3.us.archive.org/{identifier}/{directory}/{os.path.basename(file_path)}"
+    object_name = object_name or os.path.basename(file_path)
+    object_path = f"{directory}/{object_name}" if directory else object_name
+    upload_url = f"https://s3.us.archive.org/{identifier}/{quote(object_path, safe='/')}"
     file_size = os.path.getsize(file_path)
 
     retry_strategy = Retry(
@@ -85,7 +170,7 @@ def upload_file_with_progress(identifier, file_path, directory):
     }
 
     try:
-        with tqdm(total=file_size, unit="B", unit_scale=True, desc=f"Uploading {os.path.basename(file_path)}") as pbar:
+        with tqdm(total=file_size, unit="B", unit_scale=True, desc=f"Uploading {object_name}") as pbar:
             with open(file_path, "rb") as f:
                 while True:
                     chunk = f.read(1024 * 1024 * 2)  # 2MB chunks
@@ -96,7 +181,7 @@ def upload_file_with_progress(identifier, file_path, directory):
                         print(f"Error uploading {file_path}: {response.status_code} {response.reason}")
                         return False
                     pbar.update(len(chunk))
-        print(f"Successfully uploaded {file_path}")
+        print(f"Successfully uploaded {file_path} -> {object_path}")
         return True
     except requests.exceptions.SSLError as e:
         print(f"SSL Error during upload: {e}")
@@ -108,11 +193,13 @@ def upload_file_with_progress(identifier, file_path, directory):
         print(f"Unexpected error: {e}")
         return False
 
-def list_repository_files(identifier):
+def list_repository_files(identifier, display=True):
     """
     Retrieves and lists files in a repository using the metadata API.
     Calls GET https://archive.org/metadata/{identifier} and parses the "files" array.
     Filters out any file with a path component (directory) that ends with ".thumbs".
+    When display is False the numbered listing is not printed (used by the
+    download flow, which prints its own directory-style listing).
     """
     url = f"https://archive.org/metadata/{identifier}"
     try:
@@ -131,12 +218,13 @@ def list_repository_files(identifier):
                 if any(part.endswith(".thumbs") for part in parts):
                     continue
                 file_list.append(name)
-        if file_list:
-            print("Files in repository:")
-            for idx, name in enumerate(file_list, start=1):
-                print(f"{idx}. {name}")
-        else:
-            print("No files found in repository.")
+        if display:
+            if file_list:
+                print("Files in repository:")
+                for idx, name in enumerate(file_list, start=1):
+                    print(f"{idx}. {name}")
+            else:
+                print("No files found in repository.")
         return file_list
     except Exception as e:
         print("Error listing files:", e)
@@ -245,16 +333,30 @@ def download_file_with_progress(identifier, file_name, destination_dir):
     except Exception as e:
         print(f"Unexpected download error: {e}")
         return False
-
 def download_repository_files(identifier):
     """
-    Downloads one or all files from a repository.
+    Downloads a single file, a whole folder, or all files from a repository.
+    The listing is shown directory-style: folders (with file counts) followed
+    by their contents; entering a folder's number downloads every file it
+    contains.
     """
-    file_list = list_repository_files(identifier)
+    file_list = list_repository_files(identifier, display=False)
     if not file_list:
+        print("No files found in repository.")
         return
 
-    destination_dir_input = input("Enter destination folder (leave blank for current directory): ").strip().strip('\"').strip("'")
+    rows = build_download_listing(file_list)
+    print("\nRepository contents (pick a number to download a file or a whole folder):")
+    for number, row in enumerate(rows, start=1):
+        indent = "    " * row["depth"]
+        if row["type"] == "folder":
+            count = len(row["file_indices"])
+            plural = "s" if count != 1 else ""
+            print(f"{number}. {indent}{row['label']} ({count} file{plural})")
+        else:
+            print(f"{number}. {indent}{row['label']}")
+
+    destination_dir_input = input("\nEnter destination folder (leave blank for current directory): ").strip().strip('"').strip("'")
     destination_dir = os.path.abspath(os.path.expanduser(destination_dir_input)) if destination_dir_input else os.getcwd()
 
     try:
@@ -264,20 +366,31 @@ def download_repository_files(identifier):
         return
 
     print("\nDownload Options:")
-    print("1. Download a single file")
+    print("1. Download a single file or a whole folder")
     print("2. Download all files")
     download_choice = input("Enter your choice (1 or 2): ").strip()
 
     if download_choice == "1":
-        print("Enter the number of the file to download:")
+        print("Enter the number of the file or folder to download:")
         try:
-            index = int(input().strip()) - 1
-            if 0 <= index < len(file_list):
-                download_file_with_progress(identifier, file_list[index], destination_dir)
-            else:
-                print("Invalid index.")
+            number = int(input().strip())
         except ValueError:
             print("Invalid input.")
+            return
+        if not 1 <= number <= len(rows):
+            print("Invalid number.")
+            return
+        row = rows[number - 1]
+        if row["type"] == "folder":
+            selected_files = [file_list[i] for i in row["file_indices"]]
+            print(f"Downloading folder '{row['path']}' ({len(selected_files)} file(s))...")
+        else:
+            selected_files = [row["path"]]
+        successful_downloads = 0
+        for file_name in selected_files:
+            if download_file_with_progress(identifier, file_name, destination_dir):
+                successful_downloads += 1
+        print(f"\nDownloaded {successful_downloads} of {len(selected_files)} file(s).")
     elif download_choice == "2":
         successful_downloads = 0
         for file_name in file_list:
@@ -285,6 +398,7 @@ def download_repository_files(identifier):
                 successful_downloads += 1
         print(f"\nDownloaded {successful_downloads} of {len(file_list)} files.")
     else:
+        print("Invalid choice. Exiting download menu.")
         print("Invalid choice. Exiting download menu.")
 
 def create_rules_file(folder_path):
@@ -406,7 +520,8 @@ IA Interact - Help
 
 Main Menu Options:
 1. Upload files to an existing repository:
-   - Provide file paths to upload into a specified directory.
+   - Provide file and/or folder paths to upload into a specified directory.
+   - Folders are uploaded recursively and their structure is preserved.
 2. List files in a repository:
    - Retrieve and display files using the metadata API.
 3. Delete a file from a repository:
@@ -414,7 +529,8 @@ Main Menu Options:
 4. Move a file within a repository:
    - Copy a file to a new directory using x-amz-copy-source, then delete the original.
 5. Download files from a repository:
-   - Download one or all files to a local destination folder.
+   - Pick a file or a whole folder from the directory-style listing,
+     or download all files, to a local destination folder.
 6. Create or access a repository from a folder:
    - Upload an entire folder as a new repository with metadata and mode selection.
 7. Help:
@@ -485,16 +601,34 @@ def main():
             else:
                 print("Invalid choice. Exiting.")
                 return
-            print("Enter file paths (comma-separated):")
-            files_input = input().strip()
-            file_paths = [f.strip().strip('\"').strip("'") for f in files_input.split(",")]
-            for file in file_paths:
-                if not os.path.exists(file):
-                    print(f"File not found: {file}")
+            print("Enter file and/or folder paths (comma-separated).")
+            print("Folders are uploaded recursively and their structure is preserved.")
+            paths_input = input().strip()
+            paths = [p.strip().strip('"').strip("'") for p in paths_input.split(",") if p.strip()]
+            upload_jobs = []  # (local_path, repository-side object name)
+            for path in paths:
+                if os.path.isdir(path):
+                    folder_name = os.path.basename(os.path.normpath(path)) or "folder"
+                    entries, errors = collect_folder_files(path)
+                    for error_path, error_message in errors:
+                        print(f"Warning: could not read {error_path}: {error_message}")
+                    if not entries:
+                        print(f"No files found in folder: {path}")
+                        return
+                    print(f"Folder '{path}': {len(entries)} file(s) will be uploaded under '{folder_name}/'")
+                    for entry in entries:
+                        upload_jobs.append((entry["local_path"], f"{folder_name}/{entry['rel']}"))
+                elif os.path.isfile(path):
+                    upload_jobs.append((path, os.path.basename(path)))
+                else:
+                    print(f"Path not found: {path}")
                     return
+            if not upload_jobs:
+                print("No paths entered.")
+                return
             success = True
-            for file_path in file_paths:
-                if not upload_file_with_progress(identifier, file_path, directory):
+            for local_path, object_name in upload_jobs:
+                if not upload_file_with_progress(identifier, local_path, directory, object_name=object_name):
                     success = False
             if success:
                 print("\nAll files uploaded successfully!")

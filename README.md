@@ -31,7 +31,7 @@ Use this script to list files, upload files, download files, delete files, move 
   - [Overview](#overview)
   - [Detailed Breakdown by Function](#detailed-breakdown-by-function)
     - [1. `get_repo_identifier(repo_link)`](#1-get_repo_identifierrepo_link)
-    - [2. `upload_file_with_progress(identifier, file_path, directory)`](#2-upload_file_with_progressidentifier-file_path-directory)
+    - [2. `upload_file_with_progress(identifier, file_path, directory, object_name=None)`](#2-upload_file_with_progressidentifier-file_path-directory-object_namenone)
     - [3. `list_repository_files(identifier)`](#3-list_repository_filesidentifier)
     - [4. `delete_file(identifier, file_path)`](#4-delete_fileidentifier-file_path)
     - [5. `move_file(identifier, file_name, source_dir, target_dir)`](#5-move_fileidentifier-file_name-source_dir-target_dir)
@@ -46,6 +46,9 @@ Use this script to list files, upload files, download files, delete files, move 
 ## Features
 - **Interactive Menu:** Choose options to list files, upload files, download files, delete or move files, or create a new repository.
 - **Basic GUI Mode:** Includes a login page for S3 keys, repository file list selection for download, and local file list selection for upload.
+- **Batch Folder Upload (GUI):** Add whole folders with the Add Folder button or by dragging & dropping them from your file manager; subfolder structure is preserved on upload.
+- **Account Repository Browser (GUI):** A My Repositories profile page lists every archive.org item uploaded by the account's screenname, so any repository can be selected and loaded with one click.
+- **Folder Upload/Download (CLI):** Upload whole folders with their structure preserved, and download a single file, a whole folder, or everything from a directory-style listing.
 - **Single Launcher:** One executable supports both modes (CLI by default, GUI via `--gui`).
 - **Flexible Repository Input:** Accepts a plain identifier (for example `my_item`) or Archive URLs such as `/details/`, `/download/`, and `/metadata/`.
 - **Test Mode & Permanent Mode:** Run in simulation (Test Mode, where no changes are made) or execute actual changes (Permanent Mode).
@@ -111,11 +114,13 @@ Install internet archive CLI via pipx:
 
 **Install Required Libraries:**
 
-   pip3 install requests tqdm
+   pip3 install requests tqdm tkinterdnd2
+
+`tkinterdnd2` is optional at runtime; it enables drag & drop in the GUI (the GUI works without it, drag & drop is simply disabled).
 
 **Verify the Library Installation:**
 
-    pip3 show requests tqdm
+    pip3 show requests tqdm tkinterdnd2
 
 
 ![alt text](image-3.png)
@@ -219,7 +224,9 @@ Recommended flow:
 2. Open `cmd` in the folder containing `ia-interact.py` (File Explorer address bar -> type `cmd`).
 3. Install dependencies:
 
-       python -m pip install requests tqdm
+       python -m pip install requests tqdm tkinterdnd2
+
+   (`tkinterdnd2` is optional; it enables GUI drag & drop.)
 
 4. Run the tool:
 
@@ -247,12 +254,17 @@ Or use the unified launcher:
 
 GUI flow:
 1. Enter S3 access and secret keys on the login page.
-2. Enter your repository URL or identifier (for example `archive.org/details/<id>`, `archive.org/download/<id>/...`, `archive.org/metadata/<id>`, or just `<id>`).
-3. Select repository files (left list) to download.
-4. Add/select local files (right list) to upload.
+2. Enter your repository URL or identifier (for example `archive.org/details/<id>`, `archive.org/download/<id>/...`, `archive.org/metadata/<id>`, or just `<id>`), or double-click one in the **My Repositories** list in the Repository panel (auto-listed from the account's saved screenname), or click **Browse Repositories** for the full list page.
+3. Repository files (left list) are shown directory-style: folders are listed first with their contents indented, and each folder shows its file count (double-click a folder to collapse/expand it). Select individual files or a whole folder - selecting a folder selects every file it contains, so a whole folder can be downloaded in one action. Right-click a file or folder for a quick download menu (**Download This File** / **Download This Folder** / **Download Selected**).
+4. Add local files (right list) to upload, in any of these ways:
+   - **Add Files** selects individual files.
+   - **Add Folder** recursively adds every file in a folder, subfolders included.
+   - Drag & drop files or whole folders from your file manager onto the Local Files panel (needs the optional `tkinterdnd2` package; otherwise the panel notes that drag & drop is unavailable).
+   - When files come from a folder, subfolder structure is preserved: each file uploads to `target directory/<folder name>/<subfolders>/<file>`. Untick **Keep folder name in upload path** to upload the folder's contents directly under the target directory.
 5. Set target upload directory and run upload/download actions.
    - Upload can start directly from a valid repository field value.
    - Download requires a loaded repository file list.
+   - Upload sends every file in the local list (use Remove Selected / Clear to trim it first); a warning is logged if two queued files would land on the same repository path.
 
 ### 9. Account Profiles (S3 key manager)
 
@@ -260,7 +272,9 @@ The GUI can save named S3 account profiles so you do not have to re-enter keys e
 
 - On the login screen, the **Saved Profile** dropdown lists profiles stored locally; selecting one fills in the keys. **Manage** opens the Account Manager to add, edit, or remove profiles.
 - On the main screen, the **Accounts** button opens the Account Manager in switch mode; choosing a profile and clicking **Use** switches the active account live (no restart needed).
-- In the Account Manager, fields are Profile name, S3 access key, S3 secret key (masked, with a **Show** toggle), and optional Notes. Duplicate names and empty key fields are rejected.
+- In the Account Manager, fields are Profile name, S3 access key, S3 secret key (masked, with a **Show** toggle), optional IA screenname, and optional Notes. Duplicate names and empty key fields are rejected.
+- The **IA screenname** is the username part of your archive.org profile URL (for example `archive.org/details/@yourname`); it is case-sensitive. It is only needed for the My Repositories page.
+- **My Repositories** is integrated into the main window: the Repository panel's list view shows every archive.org item uploaded by the active account, auto-loaded from the profile's saved **IA screenname** as soon as you log in or switch accounts (**Refresh** re-loads it; double-clicking an entry fills the Repository field and loads that item's file list; saved-only items are tagged `[saved]`). If the profile has no screenname the list shows a hint instead. **Browse Repositories** (account bar) opens the full page with a filter box: enter one or more screennames separated by commas (`@names` and full profile URLs like `archive.org/details/@name` also work); both uploader search forms are combined so items appear no matter which uploader field they carry, wrong-case names are retried in lowercase, and items the account saved (favorites) can be included via **Include saved items**. **Use Selected** (or double-click) loads the chosen repository; **Open in Browser** shows its details page. After a successful load the screenname list is saved back to the profile, which also refreshes the main-window list view.
 - Profiles are stored in `~/.config/ia-interact/accounts.json` (or `$XDG_CONFIG_HOME/ia-interact/accounts.json`) with `0600` permissions; the directory is `0700`.
 - Keys are stored in plaintext. Rely on home-directory / full-disk encryption for protection at rest, and do not store keys on shared machines.
 
@@ -316,8 +330,8 @@ When opened/clicked from a desktop environment, the packaged app defaults to GUI
 When the script runs, it displays an interactive menu with the following options:
 
 - **List Files:** Display the contents of an existing repository.
-- **Upload Files:** Add files to a repository.
-- **Download Files:** Download one file or all files from a repository to a local folder.
+- **Upload Files:** Add files or whole folders to a repository (folders upload recursively and their structure is preserved).
+- **Download Files:** Download a single file, a whole folder, or all files from a repository's directory-style listing to a local folder.
 - **Delete/Move Files:** Manage files within a repository.
 - **Create a New Repository:** Upload an entire folder and configure repository metadata.
 
@@ -365,7 +379,7 @@ During repository creation, you will be prompted to:
 - **Listing Repository Contents:** Retrieve and display the contents of a repository using the metadata API.
 - **Deleting Files:** Remove specified files from a repository.
 - **Moving Files:** Change a file’s location within a repository by copying it and then deleting the original.
-- **Downloading Files:** Download a single file or all files from a repository to a local path.
+- **Downloading Files:** Download a single file, a whole folder, or all files from a repository to a local path (the CLI download menu shows a directory-style listing with folder file counts).
 - **Creating a New Repository:** Upload a folder as a new repository and submit metadata.
 - **User Interaction:** Offers an interactive menu with a help option, test mode (simulation) vs. permanent mode, and filtering to avoid showing files from ".thumbs" directories.
 
@@ -386,7 +400,7 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
 
 ---
 
-### 2. `upload_file_with_progress(identifier, file_path, directory)`
+### 2. `upload_file_with_progress(identifier, file_path, directory, object_name=None)`
 - **Purpose:**  
   Uploads a file to a specified directory within a repository.
 - **Key Features:**
@@ -394,8 +408,9 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
   - **Progress Tracking:** Uses the `tqdm` library to display a real-time progress bar.
   - **Retry Logic:** Implements retry strategy (5 retries) using an HTTPAdapter.
   - **S3 Authentication:** Reads S3 keys from environment variables and includes them in the request headers.
+  - **Folder Uploads:** `object_name` is the repository-side path and may contain `/`-separated subdirectories, so files collected from a local folder (via `collect_folder_files`) upload with their structure preserved. It defaults to the file's basename.
 - **Note:**  
-  The function sends HTTP PUT requests to the URL `https://s3.us.archive.org/{identifier}/{directory}/{filename}` to perform the upload.
+  The function sends HTTP PUT requests to the URL `https://s3.us.archive.org/{identifier}/{directory}/{object_path}` to perform the upload.
 
 ---
 
@@ -405,7 +420,7 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
 - **Key Features:**
   - **Metadata API:** Sends a GET request to `https://archive.org/metadata/{identifier}` to fetch repository metadata (in JSON).
   - **Filtering:** Excludes any files that reside in directories with names ending in ".thumbs" (i.e. if any component of the path ends with ".thumbs").
-  - **Display:** Prints out a numbered list of the filtered file names.
+  - **Display:** Prints out a numbered list of the filtered file names. `display=False` skips the printing; the download menu uses it to print its own directory-style listing instead (folders with file counts, built via `build_download_listing`).
 
 ---
 
@@ -476,6 +491,7 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
   Serves as the entry point of the script with an interactive menu.
 - **Key Features:**
   - **Main Menu:** Displays options for uploading, listing, deleting, moving, and downloading files, creating a repository, or viewing help.
+  - **Folder Support:** Upload (option 1) accepts files and/or folders — folders upload recursively with their structure preserved. Download (option 5) shows a directory-style listing and accepts a file or folder number; a folder number downloads every file in that folder.
   - **Conditional Prompts:**  
     - **For Existing Repositories (options 1–5):** Prompts for the repository URL after the option selection.
     - **For Folder-based Repository Creation (option 6):** Gathers folder path, mode, and metadata.

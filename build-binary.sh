@@ -31,6 +31,7 @@ fi
   --clean \
   --onefile \
   --icon "$ICON_PNG" \
+  --collect-all tkinterdnd2 \
   --name ia-interact \
   --distpath "$DIST_PATH" \
   --workpath "$BUILD_PATH" \
