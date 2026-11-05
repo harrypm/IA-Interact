@@ -6,6 +6,7 @@ import time
 import webbrowser
 from urllib.parse import quote, urlparse, unquote
 from urllib.request import url2pathname
+from tkinter import simpledialog
 try:
     import requests
 except ModuleNotFoundError as e:
@@ -15,7 +16,6 @@ except ModuleNotFoundError as e:
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
-    from tkinter.scrolledtext import ScrolledText
 except ModuleNotFoundError as e:
     raise SystemExit(
         "Tkinter is not available in this Python environment. "
@@ -37,6 +37,16 @@ try:
     from ia_accounts import AccountStore
 except Exception:
     AccountStore = None
+
+try:
+    import ia_network
+except Exception:
+    ia_network = None
+
+try:
+    import ia_drafts
+except Exception:
+    ia_drafts = None
 
 try:
     from version import __version__
@@ -191,18 +201,79 @@ def identifier_valid(identifier):
 IA_HEALTH_URL = "https://archive.org/metadata/nasa"
 
 
-def check_ia_alive(timeout=6):
+def fetch_item_file_info(identifier, timeout=(6, 30), proxies=None):
+    """Map of remote file name -> {"size", "md5"} for an item (empty if absent)."""
+    try:
+        response = requests.get(
+            f"https://archive.org/metadata/{quote(identifier)}",
+            timeout=timeout,
+            proxies=proxies,
+        )
+    except requests.RequestException:
+        return None  # network problem: unknown
+    if response.status_code != 200:
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    info = {}
+    for file_info in (data.get("files") or []) if isinstance(data, dict) else []:
+        name = file_info.get("name")
+        if not name:
+            continue
+        try:
+            size = int(file_info.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        info[name] = {"size": size, "md5": file_info.get("md5") or ""}
+    return info
+
+def file_md5(path, chunk_size=1024 * 1024):
+    """MD5 hex digest of a local file (streamed)."""
+    import hashlib
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def is_duplicate_upload(local_path, remote_entry):
+    """True when the local file is already on the item, identical.
+
+    Requires exact size match; when the remote file carries an md5, the
+    local hash must match too. Callers compare full repository paths, so a
+    same-named file in a DIFFERENT folder is never considered a duplicate.
+    """
+    if not remote_entry:
+        return False
+    try:
+        if os.path.getsize(local_path) != remote_entry.get("size"):
+            return False
+    except OSError:
+        return False
+    remote_md5 = (remote_entry.get("md5") or "").strip()
+    if not remote_md5:
+        return True  # same path + same size, no hash to check
+    try:
+        return file_md5(local_path) == remote_md5
+    except OSError:
+        return False
+
+def check_ia_alive(timeout=6, proxies=None):
     """Probe archive.org reachability. Returns (alive, detail)."""
     try:
-        response = requests.get(IA_HEALTH_URL, timeout=timeout)
+        response = requests.get(IA_HEALTH_URL, timeout=timeout, proxies=proxies)
     except requests.RequestException as exc:
         return False, str(exc)
     if response.status_code == 200:
         return True, "archive.org is reachable"
     return False, f"HTTP {response.status_code} {response.reason}"
 
-
-def identifier_exists(identifier, timeout=(6, 30)):
+def identifier_exists(identifier, timeout=(6, 30), proxies=None):
     """True when the identifier already exists on archive.org.
 
     The metadata API answers HTTP 200 with an empty JSON object for
@@ -210,7 +281,9 @@ def identifier_exists(identifier, timeout=(6, 30)):
     """
     try:
         response = requests.get(
-            f"https://archive.org/metadata/{quote(identifier)}", timeout=timeout
+            f"https://archive.org/metadata/{quote(identifier)}",
+            timeout=timeout,
+            proxies=proxies,
         )
     except requests.RequestException:
         return None  # network problem: unknown, not taken
@@ -252,7 +325,7 @@ def parse_screennames(raw):
     return names
 
 
-def scrape_search_items(query):
+def scrape_search_items(query, proxies=None):
     """Page through archive.org's search/scrape API for one query.
 
     Returns (items, error); items are {"identifier", "title"} dicts.
@@ -266,7 +339,7 @@ def scrape_search_items(query):
         if cursor:
             params["cursor"] = cursor
         try:
-            response = requests.get(SCRAPE_URL, params=params, timeout=(30, 120))
+            response = requests.get(SCRAPE_URL, params=params, timeout=(30, 120), proxies=proxies)
         except requests.RequestException as exc:
             return [], f"Search request failed: {exc}"
         if response.status_code != 200:
@@ -349,7 +422,7 @@ def build_file_tree_rows(file_paths):
     return build(root, 0, "")
 
 
-def fetch_account_repositories(names, include_favorites=True):
+def fetch_account_repositories(names, include_favorites=True, proxies=None):
     """Fetch every repository uploaded by the given account name(s).
 
     For each name both uploader search forms are queried and merged (union by
@@ -374,7 +447,7 @@ def fetch_account_repositories(names, include_favorites=True):
             if include_favorites:
                 queries.append(f"collection:fav-{variant}")
             for query in queries:
-                fetched, error = scrape_search_items(query)
+                fetched, error = scrape_search_items(query, proxies=proxies)
                 if error:
                     return [], error
                 found_for_variant += len(fetched)
@@ -503,12 +576,14 @@ class IAInteractGUI(tk.Tk):
         # Row counts are DPI-adaptive so the fixed parts of the layout keep
         # fitting as fonts grow with the display scaling.
         self._list_rows = max(6, round(16 / self._ui_scale))
-        self._status_rows = max(5, round(10 / self._ui_scale))
+        self._status_rows = max(4, round(7 / self._ui_scale))
         self.title(f"IA Interact GUI v{__version__}")
-        self.geometry(f"{int(1040 * self._ui_scale)}x{int(740 * self._ui_scale)}")
+        # Wide-first window: the file lists are the centerpiece and get the
+        # vertical budget; controls live in compact horizontal strips.
+        self.geometry(f"{int(1280 * self._ui_scale)}x{int(700 * self._ui_scale)}")
         self.minsize(
-            min(int(940 * self._ui_scale), int(self.winfo_screenwidth() * 0.95)),
-            min(int(640 * self._ui_scale), int(self.winfo_screenheight() * 0.9)),
+            min(int(1060 * self._ui_scale), int(self.winfo_screenwidth() * 0.95)),
+            min(int(560 * self._ui_scale), int(self.winfo_screenheight() * 0.9)),
         )
         self._configure_dark_theme()
 
@@ -521,12 +596,25 @@ class IAInteractGUI(tk.Tk):
         self.remote_visible_rows = []
         self._remote_select_lock = False
         self.local_files = []
+        self._local_select_lock = False
 
         self.access_key_var = tk.StringVar()
         self.secret_key_var = tk.StringVar()
         self.repo_var = tk.StringVar()
         self.target_directory_var = tk.StringVar(value="uploads")
         self.keep_folder_name_var = tk.BooleanVar(value=True)
+        # Upload defaults: derivative generation off by stock (issue #7);
+        # skip already-uploaded identical files (issue #5).
+        self.upload_derive_var = tk.BooleanVar(value=False)
+        self.skip_existing_var = tk.BooleanVar(value=True)
+        # Viewers: collapsible folder-tree view mode (folders start COLLAPSED
+        # - you see just folders until a folder is expanded; off = flat list).
+        self.remote_tree_mode_var = tk.BooleanVar(value=True)
+        self.local_tree_mode_var = tk.BooleanVar(value=True)
+        self._local_expanded = set()    # local tree: folder paths expanded
+        self._remote_expanded = set()   # remote tree: folder paths expanded
+        self.local_tree_rows = []
+        self.local_visible_rows = []
 
         self.login_frame = None
         self.main_frame = None
@@ -547,6 +635,25 @@ class IAInteractGUI(tk.Tk):
             except Exception:
                 pass
         self.current_profile = None
+
+        # Network profiles (proxy config) + per-transfer retry count.
+        self.network_store = ia_network.NetworkStore() if ia_network is not None else None
+        if self.network_store is not None:
+            try:
+                self.network_store.load()
+            except Exception:
+                pass
+        self.retry_var = tk.IntVar(value=5)
+
+        # Drafts: named, saved upload workspaces (repo field, target dir,
+        # keep-folder flag, local file list).
+        self.draft_store = ia_drafts.DraftStore() if ia_drafts is not None else None
+        if self.draft_store is not None:
+            try:
+                self.draft_store.load()
+            except Exception:
+                pass
+        self._network_active_var = tk.StringVar(value="")
 
         self.cancel_event = threading.Event()
 
@@ -577,6 +684,7 @@ class IAInteractGUI(tk.Tk):
 
         self._build_menu()
         self._build_login_screen()
+        self._center_on_screen()
 
     def _set_window_icon(self):
         """Show the Internet Archive logo in the title bar and taskbar.
@@ -622,6 +730,52 @@ class IAInteractGUI(tk.Tk):
             width = min(max(self.winfo_width(), needed_w), max_w)
             height = min(max(self.winfo_height(), needed_h), max_h)
             self.geometry(f"{width}x{height}")
+        except tk.TclError:
+            pass
+
+    def _center_on_screen(self):
+        """Center this window on the primary monitor (called once at open)."""
+        try:
+            # winfo_width is unreliable before the window is mapped; the
+            # explicitly-set geometry string is authoritative for the size
+            # we asked for, and winfo/req sizes win once real.
+            match = re.match(r"(\d+)x(\d+)", self.geometry())
+            self.update_idletasks()
+            width = self.winfo_width()
+            height = self.winfo_height()
+            if match:
+                width = max(width, int(match.group(1)))
+                height = max(height, int(match.group(2)))
+            width = max(width, self.winfo_reqwidth())
+            height = max(height, self.winfo_reqheight())
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            x = max(0, (screen_w - width) // 2)
+            y = max(0, (screen_h - height) // 2)
+            self.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def center_dialog(self, dialog):
+        """Place a Toplevel centered over this window (wherever it is).
+
+        Deliberately NOT clamped to the primary monitor: the dialog is smaller
+        than the main window, so centering over it is always on-screen - and
+        this way dialogs follow the main window onto other monitors too.
+        """
+        try:
+            match = re.match(r"(\d+)x(\d+)", dialog.geometry())
+            dialog.update_idletasks()
+            width = dialog.winfo_width()
+            height = dialog.winfo_height()
+            if match:
+                width = max(width, int(match.group(1)))
+                height = max(height, int(match.group(2)))
+            width = max(width, dialog.winfo_reqwidth())
+            height = max(height, dialog.winfo_reqheight())
+            px = self.winfo_rootx() + max(0, (self.winfo_width() - width) // 2)
+            py = self.winfo_rooty() + max(0, (self.winfo_height() - height) // 2)
+            dialog.geometry(f"+{px}+{py}")
         except tk.TclError:
             pass
 
@@ -688,7 +842,28 @@ class IAInteractGUI(tk.Tk):
             "TCombobox",
             fieldbackground=[("readonly", self.COLOR_ENTRY), ("disabled", self.COLOR_PANEL_ALT)],
             foreground=[("readonly", self.COLOR_TEXT), ("disabled", self.COLOR_MUTED)],
+            arrowcolor=[("disabled", self.COLOR_MUTED)],
             background=[("active", self.COLOR_BORDER)],
+        )
+        # The Retries TSpinbox (and any other spinbox): clam leaves unstyled
+        # spinboxes with black text on the dark field and dark up/down arrows
+        # that are nearly invisible. Give both full contrast.
+        style.configure(
+            "TSpinbox",
+            fieldbackground=self.COLOR_ENTRY,
+            foreground=self.COLOR_TEXT,
+            background=self.COLOR_PANEL_ALT,
+            arrowcolor=self.COLOR_TEXT,
+            bordercolor=self.COLOR_BORDER,
+            lightcolor=self.COLOR_BORDER,
+            darkcolor=self.COLOR_BORDER,
+            insertcolor=self.COLOR_TEXT,
+        )
+        style.map(
+            "TSpinbox",
+            fieldbackground=[("readonly", self.COLOR_ENTRY), ("disabled", self.COLOR_PANEL_ALT)],
+            foreground=[("disabled", self.COLOR_MUTED)],
+            arrowcolor=[("disabled", self.COLOR_MUTED)],
         )
         style.configure("TButton", background=self.COLOR_PANEL_ALT, foreground=self.COLOR_TEXT, padding=(10, 6))
         style.map(
@@ -737,6 +912,32 @@ class IAInteractGUI(tk.Tk):
             arrowcolor=self.COLOR_TEXT,
             darkcolor=self.COLOR_PANEL_ALT,
             lightcolor=self.COLOR_PANEL_ALT,
+        )
+        # Scrollbar "proper theme modes": muted arrows and a quiet thumb when
+        # there is nothing to scroll (empty file lists), and a subtle active
+        # highlight otherwise - instead of full-contrast white arrows always.
+        for orient in ("Vertical", "Horizontal"):
+            style.map(
+                f"{orient}.TScrollbar",
+                arrowcolor=[
+                    ("disabled", self.COLOR_MUTED),
+                ],
+                background=[
+                    ("disabled", self.COLOR_PANEL),
+                    ("active", self.COLOR_BORDER),
+                ],
+                darkcolor=[("disabled", self.COLOR_PANEL)],
+                lightcolor=[("disabled", self.COLOR_PANEL)],
+            )
+        # Progressbar: dark trough + accent fill (clam's default is a light
+        # gray/white slider that clashes with the dark theme).
+        style.configure(
+            "Horizontal.TProgressbar",
+            troughcolor=self.COLOR_ENTRY,
+            background=self.COLOR_ACCENT,
+            bordercolor=self.COLOR_BORDER,
+            lightcolor=self.COLOR_ACCENT,
+            darkcolor=self.COLOR_ACCENT,
         )
 
     def _apply_dark_text_widget_theme(self, widget):
@@ -903,37 +1104,50 @@ class IAInteractGUI(tk.Tk):
                 account_bar, text="Accounts", command=self._open_main_account_manager
             ).pack(side="right")
 
-        repo_frame = ttk.LabelFrame(self.main_frame, text="Repository", padding=10, style="Card.TLabelframe")
-        repo_frame.pack(fill="x")
-        ttk.Label(repo_frame, text="Repository Link or Identifier", style="Card.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Entry(repo_frame, textvariable=self.repo_var, width=80).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(4, 0))
-        ttk.Button(repo_frame, text="Load Repository Files", command=self.load_repository_files, style="Accent.TButton").grid(row=1, column=1, sticky="ew", pady=(4, 0))
+        # Command strip: repository input + target directory + both actions on
+        # one wide row, so the vertical budget goes to the file lists below.
+        command_bar = ttk.LabelFrame(self.main_frame, text="Repository & Actions", padding=8, style="Card.TLabelframe")
+        command_bar.pack(fill="x")
+        ttk.Label(command_bar, text="Repository", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(command_bar, textvariable=self.repo_var).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+        ttk.Button(command_bar, text="Load Files", command=self.load_repository_files, style="Accent.TButton").grid(row=0, column=2, padx=(0, 14))
+        ttk.Label(command_bar, text="Target dir", style="Card.TLabel").grid(row=0, column=3, sticky="w", padx=(0, 6))
+        ttk.Entry(command_bar, textvariable=self.target_directory_var, width=16).grid(row=0, column=4, sticky="ew", padx=(0, 6))
+        self.upload_button = ttk.Button(command_bar, text="Upload", command=self.upload_selected_local_files, style="Accent.TButton")
+        self.upload_button.grid(row=0, column=5, padx=(0, 6))
+        self.download_button = ttk.Button(command_bar, text="Download", command=self.download_selected_repository_files, style="Accent.TButton")
+        self.download_button.grid(row=0, column=6)
+        ttk.Checkbutton(
+            command_bar, text="Derive", variable=self.upload_derive_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=7, padx=(10, 0))
+        ttk.Checkbutton(
+            command_bar, text="Skip existing", variable=self.skip_existing_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=8, padx=(8, 0))
+        command_bar.columnconfigure(1, weight=3)
+        command_bar.columnconfigure(4, weight=1)
 
-        ttk.Label(
-            repo_frame,
-            text="My Repositories (this account's uploads - double-click to open)",
-            style="Card.TLabel",
-        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(repo_frame, text="Refresh", command=self.refresh_account_repositories).grid(row=2, column=1, sticky="ew", pady=(8, 0))
-        self.account_repos_listbox = tk.Listbox(
-            repo_frame,
-            selectmode=tk.BROWSE,
-            activestyle="none",
-            exportselection=False,
-            height=6,
+        # Queued actions panel: shown only while actions wait for archive.org
+        # to come back online (see _submit_ia_action / _refresh_ia_queue_ui).
+        self._ia_queue_frame = ttk.LabelFrame(
+            self.main_frame, text="Queued - waiting for archive.org", padding=8, style="Card.TLabelframe"
         )
-        self._apply_dark_text_widget_theme(self.account_repos_listbox)
-        self.account_repos_listbox.bind("<Double-Button-1>", self._use_account_repository)
-        self.account_repos_listbox.grid(row=3, column=0, sticky="ew", padx=(0, 8), pady=(4, 0))
-        repos_scroll = ttk.Scrollbar(repo_frame, orient="vertical", command=self.account_repos_listbox.yview)
-        self.account_repos_listbox.configure(yscrollcommand=repos_scroll.set)
-        repos_scroll.grid(row=3, column=1, sticky="ns")
-        self.account_repos_count_label = ttk.Label(repo_frame, text="", style="MutedCard.TLabel")
-        self.account_repos_count_label.grid(row=4, column=0, columnspan=2, sticky="w")
-        repo_frame.columnconfigure(0, weight=1)
+        self._ia_queue_listbox = tk.Listbox(
+            self._ia_queue_frame, selectmode=tk.EXTENDED, exportselection=False,
+            activestyle="none", height=4,
+        )
+        self._apply_dark_text_widget_theme(self._ia_queue_listbox)
+        self._ia_queue_listbox.pack(side="left", fill="both", expand=True)
+        queue_buttons = ttk.Frame(self._ia_queue_frame, style="TFrame")
+        queue_buttons.pack(side="left", anchor="n", padx=(8, 0))
+        ttk.Button(queue_buttons, text="Try now", command=self._ia_check_now).pack(anchor="e")
+        ttk.Button(
+            queue_buttons, text="Remove selected", command=self._remove_queued_ia_actions
+        ).pack(anchor="e", pady=(4, 0))
 
         list_container = ttk.Frame(self.main_frame, style="TFrame")
-        list_container.pack(fill="both", expand=True, pady=(12, 8))
+        list_container.pack(fill="both", expand=True, pady=(8, 8))
         list_container.columnconfigure(0, weight=1)
         list_container.columnconfigure(1, weight=1)
         list_container.rowconfigure(0, weight=1)
@@ -960,6 +1174,15 @@ class IAInteractGUI(tk.Tk):
         self.remote_listbox.grid(row=0, column=0, sticky="nsew")
         remote_scroll.grid(row=0, column=1, sticky="ns")
         remote_scroll_x.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        remote_options = ttk.Frame(remote_frame, style="Card.TFrame")
+        remote_options.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(
+            remote_options,
+            text="Folder view (double-click folder to collapse)",
+            variable=self.remote_tree_mode_var,
+            command=self._render_remote_rows,
+            style="Card.TCheckbutton",
+        ).pack(side="left")
 
         local_frame = ttk.LabelFrame(list_container, text="Local Files (select for upload)", padding=8, style="Card.TLabelframe")
         local_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
@@ -975,6 +1198,8 @@ class IAInteractGUI(tk.Tk):
             height=self._list_rows,
         )
         self._apply_dark_text_widget_theme(self.local_listbox)
+        self.local_listbox.bind("<<ListboxSelect>>", self._on_local_select)
+        self.local_listbox.bind("<Double-Button-1>", self._toggle_local_folder)
         local_scroll = ttk.Scrollbar(local_frame, orient="vertical", command=self.local_listbox.yview)
         local_scroll_x = ttk.Scrollbar(local_frame, orient="horizontal", command=self.local_listbox.xview)
         self.local_listbox.configure(yscrollcommand=local_scroll.set, xscrollcommand=local_scroll_x.set)
@@ -998,40 +1223,51 @@ class IAInteractGUI(tk.Tk):
             command=self._on_keep_folder_name_toggled,
             style="Card.TCheckbutton",
         ).pack(side="left")
+        ttk.Checkbutton(
+            local_options,
+            text="Folder view (double-click folder to collapse)",
+            variable=self.local_tree_mode_var,
+            command=self._refresh_local_files,
+            style="Card.TCheckbutton",
+        ).pack(side="left", padx=(16, 0))
 
         self.dnd_hint_label = ttk.Label(local_frame, text="", style="MutedCard.TLabel")
         self.dnd_hint_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        action_frame = ttk.LabelFrame(self.main_frame, text="Actions", padding=10, style="Card.TLabelframe")
-        action_frame.pack(fill="x")
-        action_frame.columnconfigure(1, weight=1)
-        ttk.Label(action_frame, text="Target upload directory", style="Card.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Entry(action_frame, textvariable=self.target_directory_var).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        self.upload_button = ttk.Button(action_frame, text="Upload Local Files", command=self.upload_selected_local_files, style="Accent.TButton")
-        self.upload_button.grid(row=0, column=2, sticky="ew")
-        self.download_button = ttk.Button(action_frame, text="Download Selected Repository Files", command=self.download_selected_repository_files, style="Accent.TButton")
-        self.download_button.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        # Bottom info strip: three compact cells side by side (My Repositories
+        # | Progress | Status) instead of stacked full-width frames.
+        info_container = ttk.Frame(self.main_frame, style="TFrame")
+        info_container.pack(fill="x")
+        info_container.columnconfigure(0, weight=2)
+        info_container.columnconfigure(1, weight=3)
+        info_container.columnconfigure(2, weight=3)
 
-        # Queued actions panel: shown only while actions wait for archive.org
-        # to come back online (see _submit_ia_action / _refresh_ia_queue_ui).
-        self._ia_queue_frame = ttk.LabelFrame(
-            self.main_frame, text="Queued - waiting for archive.org", padding=8, style="Card.TLabelframe"
+        repos_frame = ttk.LabelFrame(
+            info_container, text="My Repositories (double-click to open)", padding=8, style="Card.TLabelframe"
         )
-        self._ia_queue_listbox = tk.Listbox(
-            self._ia_queue_frame, selectmode=tk.EXTENDED, exportselection=False,
-            activestyle="none", height=4,
+        repos_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        repos_frame.columnconfigure(0, weight=1)
+        self.account_repos_listbox = tk.Listbox(
+            repos_frame,
+            selectmode=tk.BROWSE,
+            activestyle="none",
+            exportselection=False,
+            height=4,
         )
-        self._apply_dark_text_widget_theme(self._ia_queue_listbox)
-        self._ia_queue_listbox.pack(side="left", fill="both", expand=True)
-        queue_buttons = ttk.Frame(self._ia_queue_frame, style="TFrame")
-        queue_buttons.pack(side="left", anchor="n", padx=(8, 0))
-        ttk.Button(queue_buttons, text="Try now", command=self._ia_check_now).pack(anchor="e")
-        ttk.Button(
-            queue_buttons, text="Remove selected", command=self._remove_queued_ia_actions
-        ).pack(anchor="e", pady=(4, 0))
+        self._apply_dark_text_widget_theme(self.account_repos_listbox)
+        self.account_repos_listbox.bind("<Double-Button-1>", self._use_account_repository)
+        self.account_repos_listbox.grid(row=0, column=0, sticky="ew")
+        repos_scroll = ttk.Scrollbar(repos_frame, orient="vertical", command=self.account_repos_listbox.yview)
+        self.account_repos_listbox.configure(yscrollcommand=repos_scroll.set)
+        repos_scroll.grid(row=0, column=1, sticky="ns")
+        repos_footer = ttk.Frame(repos_frame, style="Card.TFrame")
+        repos_footer.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ttk.Button(repos_footer, text="Refresh", command=self.refresh_account_repositories).pack(side="left")
+        self.account_repos_count_label = ttk.Label(repos_footer, text="", style="MutedCard.TLabel")
+        self.account_repos_count_label.pack(side="left", padx=(8, 0))
 
-        progress_frame = ttk.LabelFrame(self.main_frame, text="Progress", padding=8, style="Card.TLabelframe")
-        progress_frame.pack(fill="x", pady=(8, 0))
+        progress_frame = ttk.LabelFrame(info_container, text="Progress", padding=8, style="Card.TLabelframe")
+        progress_frame.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
 
         self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
@@ -1040,17 +1276,36 @@ class IAInteractGUI(tk.Tk):
             progress_frame, text="Cancel", command=self._cancel_transfer, state="disabled", width=10
         )
         self.cancel_transfer_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(progress_frame, text="Retries (0=\u221e)", style="MutedCard.TLabel").grid(
+            row=0, column=2, sticky="e", padx=(8, 4)
+        )
+        retries_spin = ttk.Spinbox(
+            progress_frame, from_=0, to=10, textvariable=self.retry_var, width=3
+        )
+        retries_spin.grid(row=0, column=3, sticky="e")
         self.progress_label = ttk.Label(progress_frame, text="Idle", style="Card.TLabel")
-        self.progress_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.progress_label.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        status_frame = ttk.LabelFrame(self.main_frame, text="Status", padding=8, style="Card.TLabelframe")
-        status_frame.pack(fill="both", expand=True, pady=(8, 0))
+        status_frame = ttk.LabelFrame(info_container, text="Status", padding=8, style="Card.TLabelframe")
+        status_frame.grid(row=0, column=2, sticky="nsew")
         status_frame.columnconfigure(0, weight=1)
         status_frame.rowconfigure(0, weight=1)
 
-        self.status_text = ScrolledText(status_frame, height=self._status_rows, wrap="word", state="disabled", padx=8, pady=8)
+        # Text + themed ttk scrollbar instead of ScrolledText: the classic
+        # ScrolledText scrollbar is a native light-white widget that cannot
+        # be themed - it glared against the dark theme.
+        status_inner = ttk.Frame(status_frame, style="TFrame")
+        status_inner.grid(row=0, column=0, sticky="nsew")
+        status_inner.columnconfigure(0, weight=1)
+        status_inner.rowconfigure(0, weight=1)
+        self.status_text = tk.Text(
+            status_inner, height=self._status_rows, wrap="word", state="disabled", padx=8, pady=8
+        )
         self._apply_dark_text_widget_theme(self.status_text)
         self.status_text.grid(row=0, column=0, sticky="nsew")
+        status_scroll = ttk.Scrollbar(status_inner, orient="vertical", command=self.status_text.yview)
+        self.status_text.configure(yscrollcommand=status_scroll.set)
+        status_scroll.grid(row=0, column=1, sticky="ns")
 
         # Enable drag & drop (optional tkinterdnd2) now that the local files
         # panel exists.
@@ -1061,7 +1316,9 @@ class IAInteractGUI(tk.Tk):
             )
 
         # Grow the window if the DPI-scaled content needs more room than the
-        # default geometry provides (never beyond the screen).
+        # default geometry provides (never beyond the screen). Deliberately NO
+        # re-centering here: that would yank the window away from wherever
+        # the user moved it during login.
         self._fit_window_to_content()
 
         # Auto-list this account's repositories from the profile's saved IA
@@ -1092,12 +1349,157 @@ class IAInteractGUI(tk.Tk):
     def _build_menu(self):
         menubar = self._make_dark_menu()
         self.menubar = menubar
+
+        network_menu = self._make_dark_menu(menubar)
+        network_menu.add_command(label="Network Settings...", command=self._open_network_dialog)
+        network_menu.add_command(label="Test Connection", command=self._ia_check_now)
+        network_menu.add_separator()
+        menubar.add_cascade(label="Network", menu=network_menu)
+        self.network_menu = network_menu
+
+        drafts_menu = self._make_dark_menu(menubar)
+        drafts_menu.add_command(label="Save Draft...", command=self._save_draft)
+        drafts_menu.add_command(label="Manage Drafts...", command=self._open_drafts_dialog)
+        drafts_menu.add_separator()
+        menubar.add_cascade(label="Drafts", menu=drafts_menu)
+        self.drafts_menu = drafts_menu
+
         help_menu = self._make_dark_menu(menubar)
         help_menu.add_command(label="Check for Updates...", command=self._open_update_dialog)
         help_menu.add_separator()
         help_menu.add_command(label="About IA Interact", command=self._open_about_dialog)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.configure(menu=menubar)
+        self._rebuild_network_menu()
+        self._rebuild_drafts_menu()
+
+    def _rebuild_network_menu(self):
+        """Refresh the Network menu's quick profile entries (radiobuttons)."""
+        menu = getattr(self, "network_menu", None)
+        if menu is None:
+            return
+        menu.delete(3, "end")  # keep Settings / Test Connection / separator
+        names = []
+        active = ""
+        if self.network_store is not None:
+            try:
+                names = self.network_store.list_names()
+                active = self.network_store.get_active() or ""
+            except Exception:
+                pass
+        self._network_active_var.set(active)
+        for name in names:
+            menu.add_radiobutton(
+                label=name,
+                variable=self._network_active_var,
+                value=name,
+                command=lambda n=name: self._activate_network_profile(n),
+            )
+        if not names:
+            menu.add_command(label="(no saved profiles)", state="disabled")
+
+    def _activate_network_profile(self, name):
+        try:
+            self.network_store.set_active(name)
+        except ValueError as exc:
+            self.append_status(f"Network profile switch failed: {exc}")
+            return
+        self.append_status(f"Network profile '{name}' applied.")
+        self._ia_check_now()  # indicator reflects the new route
+
+    def _rebuild_drafts_menu(self):
+        """Refresh the Drafts menu's quick-apply entries."""
+        menu = getattr(self, "drafts_menu", None)
+        if menu is None:
+            return
+        menu.delete(3, "end")  # keep Save / Manage / separator
+        drafts = []
+        if self.draft_store is not None:
+            try:
+                drafts = self.draft_store.list_drafts()
+            except Exception:
+                pass
+        for draft in drafts[:12]:  # cap the quick-apply section
+            menu.add_command(
+                label=f"Apply: {draft['name']}",
+                command=lambda n=draft["name"]: self._apply_draft(n),
+            )
+        if not drafts:
+            menu.add_command(label="(no drafts)", state="disabled")
+
+    # ---------------- Drafts ----------------
+
+    def _save_draft(self):
+        if self.draft_store is None:
+            return
+        default_name = self.repo_var.get().strip() or time.strftime("draft-%Y%m%d-%H%M%S")
+        name = simpledialog.askstring(
+            "Save Draft", "Draft name:", initialvalue=default_name, parent=self
+        )
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if self.draft_store.get_draft(name) is not None:
+            if not messagebox.askyesno(
+                "Save Draft", f"A draft named '{name}' already exists. Overwrite it?",
+                parent=self,
+            ):
+                return
+        data = {
+            "repo": self.repo_var.get().strip(),
+            "target_directory": self.target_directory_var.get().strip(),
+            "keep_folder_name": self.keep_folder_name_var.get(),
+            "local_files": [
+                {
+                    "local_path": entry["local_path"],
+                    "rel": entry["rel"],
+                    "folder_root": entry.get("folder_root"),
+                }
+                for entry in self.local_files
+            ],
+        }
+        try:
+            self.draft_store.save_draft(name, data)
+        except ValueError as exc:
+            messagebox.showerror("Save Draft", str(exc), parent=self)
+            return
+        self._rebuild_drafts_menu()
+        self.append_status(
+            f"Draft '{name}' saved ({len(data['local_files'])} file(s))."
+        )
+
+    def _apply_draft(self, name):
+        if self.draft_store is None:
+            return
+        draft = None
+        try:
+            draft = self.draft_store.get_draft(name)
+        except Exception:
+            pass
+        if not draft:
+            messagebox.showerror("Drafts", f"Draft '{name}' not found.", parent=self)
+            return
+        data = draft.get("data", {})
+        self.repo_var.set(data.get("repo", ""))
+        self.target_directory_var.set(data.get("target_directory", "uploads"))
+        self.keep_folder_name_var.set(bool(data.get("keep_folder_name", True)))
+        self.local_files = [
+            {
+                "local_path": entry["local_path"],
+                "rel": entry.get("rel", os.path.basename(entry["local_path"])),
+                "folder_root": entry.get("folder_root"),
+            }
+            for entry in data.get("local_files", [])
+            if isinstance(entry, dict) and entry.get("local_path")
+        ]
+        self._refresh_local_files()
+        self._warn_duplicate_targets()
+        missing = sum(1 for entry in self.local_files if not os.path.isfile(entry["local_path"]))
+        note = f"; {missing} file(s) missing on disk" if missing else ""
+        self.append_status(f"Draft '{name}' applied ({len(self.local_files)} file(s){note}).")
+
+    def _open_drafts_dialog(self):
+        DraftsDialog(self)
 
     def _open_about_dialog(self):
         dialog = tk.Toplevel(self)
@@ -1126,6 +1528,7 @@ class IAInteractGUI(tk.Tk):
         ttk.Label(body, text=info, style="Card.TLabel", justify="left").pack(anchor="w")
 
         ttk.Button(body, text="Close", command=dialog.destroy, style="Accent.TButton").pack(anchor="e", pady=(16, 0))
+        self.center_dialog(dialog)
 
         try:
             dialog.wait_visibility()
@@ -1349,7 +1752,9 @@ class IAInteractGUI(tk.Tk):
         names_label = ", ".join(names)
 
         def worker():
-            items, error = fetch_account_repositories(names, include_favorites=True)
+            items, error = fetch_account_repositories(
+                names, include_favorites=True, proxies=self._proxies()
+            )
 
             def done():
                 self._repos_fetch_running = False
@@ -1424,6 +1829,40 @@ class IAInteractGUI(tk.Tk):
         self.refresh_account_repositories()
         return True
 
+    # ---------------- Network (proxy profiles + retries) ----------------
+
+    def _proxies(self):
+        """Requests 'proxies=' argument from the active network profile.
+
+        direct -> explicitly no proxy (overrides env vars)
+        system -> None (requests follows HTTP_PROXY/HTTPS_PROXY env)
+        manual -> {"http": url, "https": url} from the stored host/port/auth
+        """
+        if self.network_store is None:
+            return None
+        try:
+            profile = self.network_store.get_active_profile()
+        except Exception:
+            profile = None
+        mode = (profile or {}).get("mode", "system")
+        if mode == "direct":
+            return {"http": None, "https": None}
+        if mode == "manual":
+            url = ia_network.proxy_url_from(profile)
+            if url:
+                return {"http": url, "https": url}
+        return None
+
+    def _retry_attempts(self):
+        """Total attempts per transfer file. None = unlimited (Retries = 0)."""
+        try:
+            retries = int(self.retry_var.get())
+        except Exception:
+            retries = 5
+        if retries <= 0:
+            return None  # unlimited
+        return min(11, retries + 1)
+
     # ---------------- IA status indicator + offline action queue ----------------
 
     def _ia_check_now(self, event=None):
@@ -1434,7 +1873,7 @@ class IAInteractGUI(tk.Tk):
         self._set_ia_indicator(checking=True)
 
         def worker():
-            alive, detail = check_ia_alive()
+            alive, detail = check_ia_alive(proxies=self._proxies())
             try:
                 self.after(0, lambda: self._ia_check_done(alive, detail))
             except RuntimeError:
@@ -1570,23 +2009,39 @@ class IAInteractGUI(tk.Tk):
         else:
             self._ia_queue_frame.pack_forget()
 
+    def _open_network_dialog(self):
+        NetworkDialog(self)
+
     def _open_create_repository_dialog(self):
         CreateRepositoryDialog(self)
 
-    def _start_upload(self, identifier, files_to_upload, target_directory):
+    def _start_upload(self, identifier, files_to_upload, target_directory, queue_derive=False, skip_existing=True):
         self.append_status(
             f"Starting upload of {len(files_to_upload)} file(s) to '{identifier}' "
             f"directory '{target_directory or '(root)'}'."
         )
+        extra_headers = None if queue_derive else {"x-archive-queue-derive": "0"}
 
         def worker():
+            remote_info = {}
+            if skip_existing:
+                remote_info = fetch_item_file_info(identifier, proxies=self._proxies()) or {}
+            skipped_count = 0
             reporter = _ProgressReporter(self, len(files_to_upload), "upload")
             success_count = 0
             for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
                 if self.cancel_event.is_set():
                     self.append_status("Upload cancelled by user.")
                     break
-                ok, detail = self.upload_single_file(identifier, file_path, remote_rel, target_directory, reporter, index)
+                full_remote_path = f"{target_directory}/{remote_rel}" if target_directory else remote_rel
+                if skip_existing and is_duplicate_upload(file_path, remote_info.get(full_remote_path)):
+                    skipped_count += 1
+                    self.append_status(f"Skipped (already on item, identical): {full_remote_path}")
+                    continue
+                ok, detail = self.upload_single_file(
+                    identifier, file_path, remote_rel, target_directory, reporter, index,
+                    extra_headers=extra_headers,
+                )
                 self.append_status(detail)
                 reporter.finish_file()
                 if ok:
@@ -1594,7 +2049,10 @@ class IAInteractGUI(tk.Tk):
             cancelled = self.cancel_event.is_set()
             self._set_transfer_running(False)
             if not cancelled:
-                self.append_status(f"Upload complete: {success_count}/{len(files_to_upload)} succeeded.")
+                summary = f"Upload complete: {success_count}/{len(files_to_upload)} uploaded"
+                if skipped_count:
+                    summary += f", {skipped_count} skipped (already on item)"
+                self.append_status(summary + ".")
             reporter.idle("Cancelled" if cancelled else "Idle")
 
         self.cancel_event.clear()
@@ -1626,14 +2084,21 @@ class IAInteractGUI(tk.Tk):
         self._set_transfer_running(True)
         threading.Thread(target=worker, daemon=True).start()
 
-    def _start_create_repository(self, identifier, metadata, files_to_upload):
+    def _start_create_repository(self, identifier, metadata, files_to_upload, queue_derive=True, skip_existing=True):
         """Create a new item: upload the files (auto-makes the bucket), then
-        POST the item metadata - the same flow as the CLI's create option."""
+        POST the item metadata - the same flow as the CLI's create option.
+
+        queue_derive=False sends x-archive-queue-derive: 0 on every upload so
+        archive.org does not generate derivative files for the item.
+        """
         self.repo_var.set(identifier)
         self.current_identifier = identifier
         self.append_status(
-            f"Creating repository '{identifier}' with {len(files_to_upload)} file(s)..."
+            f"Creating repository '{identifier}' with {len(files_to_upload)} file(s)"
+            + ("" if queue_derive else " (derivative generation disabled)")
+            + "..."
         )
+        extra_headers = None if queue_derive else {"x-archive-queue-derive": "0"}
 
         def worker():
             # Re-verify availability at run time: for a queued creation the
@@ -1645,13 +2110,27 @@ class IAInteractGUI(tk.Tk):
                     f"Repository creation aborted: '{identifier}' already exists on archive.org."
                 )
                 return
+            remote_info = {}
+            if skip_existing:
+                # Resumes a partially-failed creation: identical files already
+                # on the half-built item are skipped, the rest upload.
+                remote_info = fetch_item_file_info(identifier, proxies=self._proxies()) or {}
+            skipped_count = 0
             reporter = _ProgressReporter(self, len(files_to_upload), "create")
             success_count = 0
             for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
                 if self.cancel_event.is_set():
                     self.append_status("Repository creation cancelled by user.")
                     break
-                ok, detail = self.upload_single_file(identifier, file_path, remote_rel, "", reporter, index)
+                if skip_existing and is_duplicate_upload(file_path, remote_info.get(remote_rel)):
+                    skipped_count += 1
+                    self.append_status(f"Skipped (already on item, identical): {remote_rel}")
+                    success_count += 1  # counts toward the item being complete
+                    continue
+                ok, detail = self.upload_single_file(
+                    identifier, file_path, remote_rel, "", reporter, index,
+                    extra_headers=extra_headers,
+                )
                 self.append_status(detail)
                 reporter.finish_file()
                 if ok:
@@ -1674,6 +2153,7 @@ class IAInteractGUI(tk.Tk):
                     f"https://archive.org/metadata/{identifier}/metadata",
                     data=metadata,
                     timeout=(30, 120),
+                    proxies=self._proxies(),
                 )
             except requests.RequestException as exc:
                 self._set_transfer_running(False)
@@ -1699,12 +2179,36 @@ class IAInteractGUI(tk.Tk):
 
     def _set_remote_files(self, files):
         self.remote_files = files
+        self._remote_expanded.clear()  # fresh listing: folders start collapsed
         self.remote_tree_rows = build_file_tree_rows(files)
         self._render_remote_rows()
 
     def _render_remote_rows(self):
-        """Draw the repository file tree (folders first, contents indented)."""
+        """Draw the repository file list.
+
+        Folder view: a collapsible tree (folders first, contents indented,
+        double-click a folder to collapse/expand). Flat view: a plain sorted
+        file list.
+        """
         self.remote_listbox.delete(0, "end")
+        if not self.remote_tree_mode_var.get():
+            self.remote_visible_rows = [
+                {"type": "file", "label": name, "depth": 0,
+                 "file_index": index, "file_indices": [index]}
+                for index, name in enumerate(self.remote_files)
+            ]
+            for row in self.remote_visible_rows:
+                self.remote_listbox.insert("end", row["label"])
+            return
+
+        def apply_collapsed(rows):
+            for row in rows:
+                if row["type"] == "folder":
+                    # folders start collapsed; only user-expanded ones open
+                    row["collapsed"] = row["path"] not in self._remote_expanded
+                    apply_collapsed(row["children"])
+
+        apply_collapsed(self.remote_tree_rows)
         visible = []
 
         def collect(rows):
@@ -1720,7 +2224,8 @@ class IAInteractGUI(tk.Tk):
             if row["type"] == "folder":
                 count = len(row["file_indices"])
                 plural = "s" if count != 1 else ""
-                self.remote_listbox.insert("end", f"{indent}{row['label']}  ({count} file{plural})")
+                marker = "- " if not row.get("collapsed") else "+ "
+                self.remote_listbox.insert("end", f"{indent}{marker}{row['label']}  ({count} file{plural})")
             else:
                 self.remote_listbox.insert("end", f"{indent}{row['label']}")
 
@@ -1773,7 +2278,11 @@ class IAInteractGUI(tk.Tk):
         row = self.remote_visible_rows[index]
         if row["type"] != "folder":
             return
-        row["collapsed"] = not row.get("collapsed")
+        path = row["path"]
+        if path in self._remote_expanded:
+            self._remote_expanded.discard(path)
+        else:
+            self._remote_expanded.add(path)
         self._render_remote_rows()
 
     def _remote_row_at_y(self, y):
@@ -1848,7 +2357,160 @@ class IAInteractGUI(tk.Tk):
                     label=f"Download Selected ({count} file{plural})",
                     command=self.download_selected_repository_files,
                 )
+        if selected_files:
+            count = len(selected_files)
+            plural = "s" if count != 1 else ""
+            if menu.index("end") is not None:
+                menu.add_separator()
+            menu.add_command(
+                label=f"Delete Selected ({count} file{plural})...",
+                command=self._delete_selected_remote,
+            )
+            menu.add_command(label="Move Selected...", command=self._move_selected_remote)
         return menu
+
+    def _delete_selected_remote(self):
+        identifier = self.current_identifier
+        if not identifier:
+            messagebox.showerror("Delete", "Load a repository first.")
+            return
+        files = self._selected_remote_files()
+        if not files:
+            messagebox.showerror("Delete", "Select one or more repository files first.")
+            return
+        if not messagebox.askyesno(
+            "Delete", f"Delete {len(files)} file(s) from '{identifier}'?\nThis cannot be undone.",
+            parent=self,
+        ):
+            return
+        self._submit_ia_action(
+            "delete",
+            f"delete {len(files)} file(s) from '{identifier}'",
+            lambda: self._start_remote_file_ops(identifier, "delete", files),
+        )
+
+    def _move_selected_remote(self):
+        identifier = self.current_identifier
+        if not identifier:
+            messagebox.showerror("Move", "Load a repository first.")
+            return
+        files = self._selected_remote_files()
+        if not files:
+            messagebox.showerror("Move", "Select one or more repository files first.")
+            return
+        target_dir = simpledialog.askstring(
+            "Move", "Target directory (blank = item root):", parent=self
+        )
+        if target_dir is None:
+            return
+        target_dir = target_dir.strip().strip("/")
+        self._submit_ia_action(
+            "move",
+            f"move {len(files)} file(s) within '{identifier}'",
+            lambda: self._start_remote_file_ops(identifier, "move", files, target_dir=target_dir),
+        )
+
+    def _start_remote_file_ops(self, identifier, op, files, target_dir=None):
+        """Run delete/move over a set of repository files (CLI-parity ops)."""
+        source_dir = ""  # each file's current folder is derived from its path
+
+        def worker():
+            ok_count = 0
+            for index, file_name in enumerate(files, start=1):
+                if self.cancel_event.is_set():
+                    self.append_status(f"{op.capitalize()} cancelled by user.")
+                    break
+                if op == "delete":
+                    ok, detail = self.delete_single_file(identifier, file_name)
+                else:
+                    ok, detail = self.move_single_file(identifier, file_name, target_dir)
+                self.append_status(detail)
+                if ok:
+                    ok_count += 1
+            cancelled = self.cancel_event.is_set()
+            self._set_transfer_running(False)
+            if not cancelled:
+                self.append_status(f"{op.capitalize()} complete: {ok_count}/{len(files)} succeeded.")
+            self.after(0, self.load_repository_files)
+
+        self.cancel_event.clear()
+        self._set_transfer_running(True)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def delete_single_file(self, identifier, file_name):
+        """Delete one file from the item (S3 DELETE; CLI-parity)."""
+        delete_url = f"https://s3.us.archive.org/{identifier}/{quote(file_name, safe='/')}"
+        headers = {
+            "x-amz-auto-make-bucket": "1",
+            "Authorization": f"AWS {self.access_key}:{self.secret_key}",
+        }
+        attempts = self._retry_attempts()
+        last_detail = ""
+        attempt = 0
+        while True:
+            attempt += 1
+            if self.cancel_event.is_set():
+                break
+            try:
+                response = requests.delete(
+                    delete_url, headers=headers, timeout=(30, 120),
+                    proxies=self._proxies(),
+                )
+            except requests.RequestException as e:
+                last_detail = f"Delete failed for '{file_name}': {e}"
+            else:
+                if response.status_code in (200, 204):
+                    return True, f"Deleted: {file_name}"
+                last_detail = f"Delete failed for '{file_name}': {response.status_code} {response.reason}"
+                if response.status_code not in (500, 502, 503, 504):
+                    break
+            if attempts is not None and attempt >= attempts:
+                break
+            time.sleep(min(30, 2 ** attempt))
+        return False, last_detail or f"Delete failed: {file_name}"
+
+    def move_single_file(self, identifier, file_name, target_dir):
+        """Move a file within the item: copy (x-amz-copy-source) then delete
+        the original - the CLI's move flow, GUI-side."""
+        source_path = file_name
+        destination_path = f"{target_dir}/{file_name}" if target_dir else file_name
+        if destination_path == source_path:
+            return True, f"Skipped move (already at target): {file_name}"
+        copy_url = f"https://s3.us.archive.org/{identifier}/{quote(destination_path, safe='/')}"
+        headers = {
+            "x-amz-auto-make-bucket": "1",
+            "Authorization": f"AWS {self.access_key}:{self.secret_key}",
+            "x-amz-copy-source": f"/{identifier}/{source_path}",
+        }
+        attempts = self._retry_attempts()
+        last_detail = ""
+        attempt = 0
+        while True:
+            attempt += 1
+            if self.cancel_event.is_set():
+                break
+            try:
+                response = requests.put(
+                    copy_url, headers=headers, timeout=(30, 120),
+                    proxies=self._proxies(),
+                )
+            except requests.RequestException as e:
+                last_detail = f"Move failed for '{file_name}': {e}"
+            else:
+                if response.status_code in (200, 201):
+                    ok, detail = self.delete_single_file(identifier, source_path)
+                    if ok:
+                        return True, f"Moved: {source_path} -> {destination_path}"
+                    return False, (
+                        f"Copied but failed to delete original {source_path}: {detail}"
+                    )
+                last_detail = f"Move failed for '{file_name}': {response.status_code} {response.reason}"
+                if response.status_code not in (500, 502, 503, 504):
+                    break
+            if attempts is not None and attempt >= attempts:
+                break
+            time.sleep(min(30, 2 ** attempt))
+        return False, last_detail or f"Move failed: {file_name}"
 
     def _download_remote_row(self, index):
         """Right-click action: download exactly the file/folder at this row."""
@@ -1882,12 +2544,106 @@ class IAInteractGUI(tk.Tk):
 
     def _refresh_local_files(self):
         self.local_listbox.delete(0, "end")
+        if self.local_tree_mode_var.get():
+            self._render_local_tree()
+            return
         for entry in self.local_files:
             if entry.get("folder_root"):
                 display = f"{self._entry_remote_rel(entry)}    [{entry['local_path']}]"
             else:
                 display = entry["local_path"]
             self.local_listbox.insert("end", display)
+
+    def _render_local_tree(self):
+        """Draw the local upload list as a collapsible folder tree.
+
+        Grouped by repository-side path (target dir + folder-root name +
+        subfolders), mirroring what the upload will look like on archive.org.
+        """
+        self.local_tree_rows = build_file_tree_rows(
+            [self._entry_remote_rel(entry) for entry in self.local_files]
+        )
+
+        def apply_collapsed(rows):
+            for row in rows:
+                if row["type"] == "folder":
+                    # folders start collapsed; only user-expanded ones open
+                    row["collapsed"] = row["path"] not in self._local_expanded
+                    apply_collapsed(row["children"])
+
+        apply_collapsed(self.local_tree_rows)
+        visible = []
+
+        def collect(rows):
+            for row in rows:
+                visible.append(row)
+                if row["type"] == "folder" and not row.get("collapsed"):
+                    collect(row["children"])
+
+        collect(self.local_tree_rows)
+        self.local_visible_rows = visible
+        for row in visible:
+            indent = "    " * row["depth"]
+            if row["type"] == "folder":
+                count = len(row["file_indices"])
+                plural = "s" if count != 1 else ""
+                marker = "- " if not row.get("collapsed") else "+ "
+                self.local_listbox.insert("end", f"{indent}{marker}{row['label']}  ({count} file{plural})")
+            else:
+                entry = self.local_files[row["file_index"]]
+                self.local_listbox.insert(
+                    "end", f"{indent}{os.path.basename(entry['local_path'])}"
+                )
+
+    def _on_local_select(self, event=None):
+        """Selecting a folder row also selects every file it contains."""
+        if self._local_select_lock or not self.local_tree_mode_var.get():
+            return
+        selection = list(self.local_listbox.curselection())
+        if not selection:
+            return
+        folder_file_sets = [
+            set(self.local_visible_rows[index]["file_indices"])
+            for index in selection
+            if 0 <= index < len(self.local_visible_rows)
+            and self.local_visible_rows[index]["type"] == "folder"
+        ]
+        if not folder_file_sets:
+            return
+        extra = [
+            visible_index
+            for visible_index, row in enumerate(self.local_visible_rows)
+            if row["type"] == "file"
+            and any(row["file_index"] in file_set for file_set in folder_file_sets)
+        ]
+        if not extra:
+            return
+        self._local_select_lock = True
+        try:
+            for visible_index in extra:
+                self.local_listbox.selection_set(visible_index)
+        finally:
+            self._local_select_lock = False
+
+    def _toggle_local_folder(self, event=None):
+        """Double-click a folder row to collapse/expand it."""
+        if not self.local_tree_mode_var.get():
+            return
+        selection = list(self.local_listbox.curselection())
+        if not selection:
+            return
+        index = selection[0]
+        if not 0 <= index < len(self.local_visible_rows):
+            return
+        row = self.local_visible_rows[index]
+        if row["type"] != "folder":
+            return
+        path = row["path"]
+        if path in self._local_expanded:
+            self._local_expanded.discard(path)
+        else:
+            self._local_expanded.add(path)
+        self._refresh_local_files()
 
     def _entry_remote_rel(self, entry):
         """Repository-side path for a list entry, relative to the target directory."""
@@ -1989,12 +2745,27 @@ class IAInteractGUI(tk.Tk):
         self._warn_duplicate_targets()
 
     def remove_selected_local_files(self):
-        selected_indices = list(self.local_listbox.curselection())
-        if not selected_indices:
+        selected_rows = list(self.local_listbox.curselection())
+        if not selected_rows:
             return
 
-        for index in reversed(selected_indices):
-            del self.local_files[index]
+        if self.local_tree_mode_var.get() and self.local_visible_rows:
+            # Tree view: listbox rows are tree rows, not entry indices - map
+            # them back (a folder row removes every file it contains).
+            entry_indices = set()
+            for row_index in selected_rows:
+                if not 0 <= row_index < len(self.local_visible_rows):
+                    continue
+                row = self.local_visible_rows[row_index]
+                if row["type"] == "folder":
+                    entry_indices.update(row["file_indices"])
+                else:
+                    entry_indices.add(row["file_index"])
+            for index in sorted(entry_indices, reverse=True):
+                del self.local_files[index]
+        else:
+            for index in reversed(selected_rows):
+                del self.local_files[index]
 
         self._refresh_local_files()
         self.append_status("Removed selected local file(s) from upload list.")
@@ -2094,7 +2865,7 @@ class IAInteractGUI(tk.Tk):
         self.append_status(f"Loading repository files for '{identifier}'...")
 
         def worker():
-            files, error = self.fetch_repository_files(identifier)
+            files, error = self.fetch_repository_files(identifier, proxies=self._proxies())
             if error:
                 self.remote_listbox.after(0, lambda: self._set_remote_files([]))
                 self.append_status(error)
@@ -2108,10 +2879,10 @@ class IAInteractGUI(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     @staticmethod
-    def fetch_repository_files(identifier):
+    def fetch_repository_files(identifier, proxies=None):
         url = f"https://archive.org/metadata/{identifier}"
         try:
-            response = requests.get(url, timeout=(30, 120))
+            response = requests.get(url, timeout=(30, 120), proxies=proxies)
         except requests.RequestException as e:
             return [], f"Repository request failed: {e}"
 
@@ -2160,15 +2931,20 @@ class IAInteractGUI(tk.Tk):
         self._submit_ia_action(
             "upload",
             f"upload {len(files_to_upload)} file(s) to '{identifier}'",
-            lambda: self._start_upload(identifier, files_to_upload, target_directory),
+            lambda: self._start_upload(
+                identifier, files_to_upload, target_directory,
+                queue_derive=self.upload_derive_var.get(),
+                skip_existing=self.skip_existing_var.get(),
+            ),
         )
 
-    def upload_single_file(self, identifier, file_path, object_rel_path, directory, reporter=None, file_index=1):
+    def upload_single_file(self, identifier, file_path, object_rel_path, directory, reporter=None, file_index=1, extra_headers=None):
         """Upload one local file to the repository.
 
         object_rel_path is the repository-side path (relative to the target
         directory); it may contain '/'-separated subdirectories for files
-        that were added from a folder.
+        that were added from a folder. extra_headers adds per-call S3 headers
+        (e.g. x-archive-queue-derive for the repository-creation flow).
         """
         if not os.path.isfile(file_path):
             return False, f"Skipped missing file: {file_path}"
@@ -2179,30 +2955,62 @@ class IAInteractGUI(tk.Tk):
             "x-amz-auto-make-bucket": "1",
             "Authorization": f"AWS {self.access_key}:{self.secret_key}",
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         try:
             total = os.path.getsize(file_path)
         except OSError:
             total = 0
-        if reporter is not None:
-            reporter.start_file(file_index, object_rel_path, total)
 
-        try:
-            with open(file_path, "rb") as file_data:
-                if reporter is not None:
-                    body = ProgressFileWrapper(file_data, reporter.add_bytes)
-                else:
-                    body = file_data
-                response = requests.put(upload_url, headers=headers, data=body, timeout=(60, 600))
-        except requests.RequestException as e:
-            return False, f"Upload failed for '{file_path}': {e}"
-        except OSError as e:
-            return False, f"Upload failed opening '{file_path}': {e}"
-
-        if response.status_code != 200:
-            return False, f"Upload failed for '{file_path}' -> '{object_path}': {response.status_code} {response.reason}"
-
-        return True, f"Uploaded: {file_path} -> {object_path}"
+        # Retry loop (Retries selector on the Progress panel): transient
+        # failures (network errors, HTTP 500/502/503/504) are retried with
+        # exponential backoff; local file errors and other statuses are not.
+        attempts = self._retry_attempts()  # None = unlimited
+        last_detail = ""
+        attempt = 0
+        while True:
+            attempt += 1
+            if self.cancel_event.is_set():
+                break
+            if reporter is not None:
+                # re-called per attempt: resets the byte counters
+                reporter.start_file(file_index, object_rel_path, total)
+            try:
+                with open(file_path, "rb") as file_data:
+                    if reporter is not None:
+                        body = ProgressFileWrapper(file_data, reporter.add_bytes)
+                    else:
+                        body = file_data
+                    response = requests.put(
+                        upload_url, headers=headers, data=body,
+                        timeout=(60, 600), proxies=self._proxies(),
+                    )
+            except requests.RequestException as e:
+                last_detail = f"Upload failed for '{file_path}': {e}"
+            except OSError as e:
+                return False, f"Upload failed opening '{file_path}': {e}"
+            else:
+                if response.status_code == 200:
+                    return True, f"Uploaded: {file_path} -> {object_path}"
+                last_detail = (
+                    f"Upload failed for '{file_path}' -> '{object_path}': "
+                    f"{response.status_code} {response.reason}"
+                )
+                if response.status_code not in (500, 502, 503, 504):
+                    break  # not a transient error: no point retrying
+            if attempts is not None and attempt >= attempts:
+                break
+            delay = min(30, 2 ** attempt)
+            if reporter is not None:
+                reporter.idle(
+                    f"Retrying {object_rel_path} (attempt {attempt + 1}"
+                    + (f"/{attempts}" if attempts else "") + f") in {delay}s"
+                )
+            deadline = time.time() + delay
+            while time.time() < deadline and not self.cancel_event.is_set():
+                time.sleep(0.2)
+        return False, last_detail or f"Upload failed: {file_path}"
 
     def download_selected_repository_files(self):
         repo_identifier = self.extract_repo_identifier(self.repo_var.get().strip())
@@ -2250,41 +3058,407 @@ class IAInteractGUI(tk.Tk):
             os.makedirs(output_dir, exist_ok=True)
 
         download_url = f"https://archive.org/download/{identifier}/{quote(file_name, safe='/')}"
-        try:
-            response = requests.get(download_url, stream=True, timeout=(60, 600))
-        except requests.RequestException as e:
-            return False, f"Download failed for '{file_name}': {e}"
 
-        if response.status_code != 200:
-            return False, f"Download failed for '{file_name}': {response.status_code} {response.reason}"
-
-        try:
-            total_header = response.headers.get("content-length")
-            total = int(total_header) if total_header else 0
-        except (TypeError, ValueError):
-            total = 0
-        if reporter is not None:
-            reporter.start_file(file_index, os.path.basename(file_name), total)
-
-        cancelled = False
-        try:
-            with open(output_path, "wb") as output_file:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    output_file.write(chunk)
+        # Retry loop (Retries selector on the Progress panel): transient
+        # failures (network errors, HTTP 500/502/503/504) are retried with
+        # exponential backoff; local write errors and other statuses are not.
+        attempts = self._retry_attempts()  # None = unlimited
+        last_detail = ""
+        attempt = 0
+        while True:
+            attempt += 1
+            if self.cancel_event.is_set():
+                break
+            cancelled = False
+            try:
+                response = requests.get(
+                    download_url, stream=True, timeout=(60, 600),
+                    proxies=self._proxies(),
+                )
+            except requests.RequestException as e:
+                last_detail = f"Download failed for '{file_name}': {e}"
+            else:
+                if response.status_code != 200:
+                    last_detail = (
+                        f"Download failed for '{file_name}': "
+                        f"{response.status_code} {response.reason}"
+                    )
+                    if response.status_code not in (500, 502, 503, 504):
+                        break  # not a transient error: no point retrying
+                else:
+                    try:
+                        total_header = response.headers.get("content-length")
+                        total = int(total_header) if total_header else 0
+                    except (TypeError, ValueError):
+                        total = 0
                     if reporter is not None:
-                        reporter.add_bytes(len(chunk))
-                    if self.cancel_event.is_set():
-                        cancelled = True
-                        break
-        except OSError as e:
-            return False, f"Download failed writing '{output_path}': {e}"
+                        reporter.start_file(file_index, os.path.basename(file_name), total)
+                    try:
+                        with open(output_path, "wb") as output_file:
+                            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                                if not chunk:
+                                    continue
+                                output_file.write(chunk)
+                                if reporter is not None:
+                                    reporter.add_bytes(len(chunk))
+                                if self.cancel_event.is_set():
+                                    cancelled = True
+                                    break
+                    except OSError as e:
+                        return False, f"Download failed writing '{output_path}': {e}"
+                    if cancelled:
+                        return False, f"Download cancelled: {file_name}"
+                    return True, f"Downloaded: {output_path}"
+            if attempts is not None and attempt >= attempts:
+                break
+            delay = min(30, 2 ** attempt)
+            if reporter is not None:
+                reporter.idle(
+                    f"Retrying {file_name} (attempt {attempt + 1}"
+                    + (f"/{attempts}" if attempts else "") + f") in {delay}s"
+                )
+            deadline = time.time() + delay
+            while time.time() < deadline and not self.cancel_event.is_set():
+                time.sleep(0.2)
+        return False, last_detail or f"Download failed: {file_name}"
 
-        if cancelled:
-            return False, f"Download cancelled: {file_name}"
 
-        return True, f"Downloaded: {output_path}"
+class DraftsDialog(tk.Toplevel):
+    """Manage saved drafts: list, apply to the main window, delete."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_gui = parent
+        self.title("Drafts")
+        scale = getattr(parent, "_ui_scale", 1.0)
+        self.geometry(f"{int(620 * scale)}x{int(380 * scale)}")
+        self.minsize(int(520 * scale), int(300 * scale))
+        self.configure(bg=IAInteractGUI.COLOR_BG)
+        self.transient(parent)
+
+        frame = ttk.LabelFrame(self, text="Saved drafts", padding=10, style="Card.TLabelframe")
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        self.listbox = tk.Listbox(frame, selectmode=tk.BROWSE, activestyle="none", exportselection=False)
+        self.listbox.configure(
+            bg=IAInteractGUI.COLOR_ENTRY,
+            fg=IAInteractGUI.COLOR_TEXT,
+            selectbackground=IAInteractGUI.COLOR_ACCENT_ACTIVE,
+            selectforeground=IAInteractGUI.COLOR_ENTRY,
+            highlightthickness=1,
+            highlightbackground=IAInteractGUI.COLOR_BORDER,
+            highlightcolor=IAInteractGUI.COLOR_ACCENT,
+            borderwidth=0,
+            relief="flat",
+        )
+        self.listbox.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.listbox.bind("<Double-Button-1>", lambda _e: self._apply())
+
+        buttons = ttk.Frame(self, style="TFrame")
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="Apply", style="Accent.TButton", command=self._apply).pack(side="left")
+        ttk.Button(buttons, text="Delete", command=self._delete).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+        self._refresh()
+        self.parent_gui.center_dialog(self)
+        try:
+            self.wait_visibility()
+        except tk.TclError:
+            pass
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
+
+    def _selected_draft(self):
+        selection = self.listbox.curselection()
+        if not selection or not 0 <= selection[0] < len(self.listbox_drafts):
+            return None
+        return self.listbox_drafts[selection[0]]["name"]
+
+    def _refresh(self):
+        drafts = self.parent_gui.draft_store.list_drafts() if self.parent_gui.draft_store else []
+        self.listbox_drafts = drafts
+        self.listbox.delete(0, "end")
+        for draft in drafts:
+            count = len((draft.get("data") or {}).get("local_files", []))
+            updated = time.strftime("%Y-%m-%d %H:%M", time.localtime(draft.get("updated", 0)))
+            self.listbox.insert("end", f"{draft['name']}    {count} file(s)    {updated}")
+
+    def _apply(self):
+        name = self._selected_draft()
+        if not name:
+            return
+        self.parent_gui._apply_draft(name)
+        self._refresh()
+
+    def _delete(self):
+        name = self._selected_draft()
+        if not name:
+            return
+        if not messagebox.askyesno("Drafts", f"Delete draft '{name}'?", parent=self):
+            return
+        try:
+            self.parent_gui.draft_store.delete_draft(name)
+        except ValueError as exc:
+            messagebox.showerror("Drafts", str(exc), parent=self)
+            return
+        self.parent_gui._rebuild_drafts_menu()
+        self._refresh()
+
+
+class NetworkDialog(tk.Toplevel):
+    """Network settings page: named proxy profiles + a live connectivity test.
+
+    Profiles are stored in ~/.config/ia-interact/network.json (0600) via
+    ia_network.NetworkStore. The active profile applies to all archive.org
+    traffic the GUI generates (health checks, listings, searches, uploads,
+    downloads, metadata posts).
+    """
+
+    MODE_LABELS = {"Direct (no proxy)": "direct", "System (env vars)": "system", "Manual proxy": "manual"}
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_gui = parent
+        self.title("Network")
+        scale = getattr(parent, "_ui_scale", 1.0)
+        self.geometry(f"{int(560 * scale)}x{int(430 * scale)}")
+        self.minsize(int(480 * scale), int(360 * scale))
+        self.configure(bg=IAInteractGUI.COLOR_BG)
+        self.transient(parent)
+
+        self.profile_var = tk.StringVar()
+        self.name_var = tk.StringVar()
+        self.mode_var = tk.StringVar(value="System (env vars)")
+        self.host_var = tk.StringVar()
+        self.port_var = tk.StringVar()
+        self.user_var = tk.StringVar()
+        self.password_var = tk.StringVar()
+        self.show_password_var = tk.BooleanVar(value=False)
+
+        self._build_ui()
+        self._refresh_profiles()
+        active = None
+        try:
+            active = parent.network_store.get_active() if parent.network_store else None
+        except Exception:
+            pass
+        if active:
+            self.profile_var.set(active)
+            self._load_profile(active)
+        parent.center_dialog(self)
+        try:
+            self.wait_visibility()
+        except tk.TclError:
+            pass
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
+
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=12, style="TFrame")
+        root.pack(fill="both", expand=True)
+
+        # ----- proxy mode + connection fields -----
+        form = ttk.LabelFrame(root, text="Proxy", padding=10, style="Card.TLabelframe")
+        form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
+
+        ttk.Label(form, text="Profile name", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(form, textvariable=self.name_var).grid(row=0, column=1, columnspan=3, sticky="ew", pady=(0, 6))
+
+        ttk.Label(form, text="Mode", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.mode_combo = ttk.Combobox(
+            form, textvariable=self.mode_var,
+            values=list(self.MODE_LABELS.keys()), state="readonly",
+        )
+        self.mode_combo.grid(row=1, column=1, columnspan=3, sticky="ew", pady=(0, 6))
+
+        ttk.Label(form, text="Proxy host", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(form, textvariable=self.host_var).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(0, 6))
+        ttk.Label(form, text="Port", style="Card.TLabel").grid(row=2, column=2, sticky="e", pady=(0, 6))
+        ttk.Entry(form, textvariable=self.port_var, width=8).grid(row=2, column=3, sticky="w", pady=(0, 6))
+
+        ttk.Label(form, text="User (optional)", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(form, textvariable=self.user_var).grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=(0, 6))
+        ttk.Label(form, text="Password (optional)", style="Card.TLabel").grid(row=3, column=2, sticky="e", pady=(0, 6))
+        self.password_entry = ttk.Entry(form, textvariable=self.password_var, show="*")
+        self.password_entry.grid(row=3, column=3, sticky="ew", pady=(0, 6))
+
+        # ----- saved profiles -----
+        saved = ttk.LabelFrame(root, text="Saved profiles", padding=10, style="Card.TLabelframe")
+        saved.pack(fill="x", pady=(8, 0))
+        saved.columnconfigure(1, weight=1)
+        ttk.Label(saved, text="Active", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.profile_combo = ttk.Combobox(saved, textvariable=self.profile_var, state="readonly")
+        self.profile_combo.grid(row=0, column=1, sticky="ew", pady=(0, 6))
+        self.profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._load_profile(self.profile_var.get()))
+        buttons = ttk.Frame(saved, style="Card.TFrame")
+        buttons.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Button(buttons, text="Save as new", command=self._save_new).pack(side="left")
+        ttk.Button(buttons, text="Update", command=self._update).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Remove", command=self._remove).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Use", style="Accent.TButton", command=self._use).pack(side="right")
+
+        # ----- connectivity test -----
+        test_row = ttk.Frame(root, style="TFrame")
+        test_row.pack(fill="x", pady=(8, 0))
+        self.test_button = ttk.Button(test_row, text="Test connection", command=self._test)
+        self.test_button.pack(side="left")
+        self.test_result = ttk.Label(test_row, text="", style="MutedCard.TLabel")
+        self.test_result.pack(side="left", padx=(10, 0))
+
+        ttk.Button(root, text="Close", command=self.destroy).pack(anchor="e", pady=(10, 0))
+
+    # ---------- form <-> store ----------
+
+    def _collect(self):
+        mode = self.MODE_LABELS.get(self.mode_var.get(), "system")
+        return {
+            "name": self.name_var.get().strip(),
+            "mode": mode,
+            "host": self.host_var.get().strip(),
+            "port": self.port_var.get().strip(),
+            "username": self.user_var.get().strip(),
+            "password": self.password_var.get(),
+        }
+
+    def _load_profile(self, name):
+        profile = self.parent_gui.network_store.get_profile(name) if self.parent_gui.network_store else None
+        if not profile:
+            return
+        self.name_var.set(profile.get("name", ""))
+        mode = profile.get("mode", "system")
+        for label, value in self.MODE_LABELS.items():
+            if value == mode:
+                self.mode_var.set(label)
+                break
+        self.host_var.set(profile.get("host", ""))
+        self.port_var.set(str(profile.get("port", "")))
+        self.user_var.set(profile.get("username", ""))
+        self.password_var.set(profile.get("password", ""))
+
+    def _refresh_profiles(self):
+        names = self.parent_gui.network_store.list_names() if self.parent_gui.network_store else []
+        self.profile_combo.configure(values=names)
+        current = self.profile_var.get()
+        if current not in names:
+            self.profile_var.set(names[0] if names else "")
+
+    def _save_new(self):
+        data = self._collect()
+        if not data["name"]:
+            messagebox.showerror("Network", "Profile name is required.", parent=self)
+            return
+        try:
+            self.parent_gui.network_store.add_profile(**data)
+            self.parent_gui.network_store.set_active(data["name"])
+        except ValueError as exc:
+            messagebox.showerror("Network", str(exc), parent=self)
+            return
+        self.profile_var.set(data["name"])
+        self._refresh_profiles()
+        self._applied()
+
+    def _update(self):
+        name = self.profile_var.get().strip()
+        if not name:
+            messagebox.showerror("Network", "Select a saved profile first.", parent=self)
+            return
+        data = self._collect()
+        try:
+            self.parent_gui.network_store.update_profile(
+                name, mode=data["mode"], host=data["host"], port=data["port"],
+                username=data["username"], password=data["password"],
+            )
+        except ValueError as exc:
+            messagebox.showerror("Network", str(exc), parent=self)
+            return
+        self._applied()
+
+    def _remove(self):
+        name = self.profile_var.get().strip()
+        if not name:
+            return
+        try:
+            self.parent_gui.network_store.remove_profile(name)
+        except ValueError as exc:
+            messagebox.showerror("Network", str(exc), parent=self)
+            return
+        self.profile_var.set("")
+        self._refresh_profiles()
+        self._applied()
+
+    def _use(self):
+        name = self.profile_var.get().strip()
+        if not name:
+            messagebox.showerror("Network", "Select a saved profile first.", parent=self)
+            return
+        try:
+            self.parent_gui.network_store.set_active(name)
+        except ValueError as exc:
+            messagebox.showerror("Network", str(exc), parent=self)
+            return
+        self._applied()
+        self.destroy()
+
+    def _applied(self):
+        self.parent_gui._rebuild_network_menu()  # quick-switch list follows changes
+        self.parent_gui.append_status(
+            f"Network profile '{self.profile_var.get() or '(none)'}' applied."
+        )
+        self.parent_gui._ia_check_now()  # indicator reflects the new route
+
+    # ---------- connectivity test ----------
+
+    def _test(self):
+        data = self._collect()
+        proxies = None
+        if data["mode"] == "direct":
+            proxies = {"http": None, "https": None}
+        elif data["mode"] == "manual":
+            url = ia_network.proxy_url_from(data)
+            if not url:
+                self.test_result.configure(text="Enter a proxy host first.")
+                return
+            proxies = {"http": url, "https": url}
+        self.test_button.configure(state="disabled")
+        self.test_result.configure(text="Testing\u2026")
+
+        def worker():
+            alive, detail = check_ia_alive(timeout=8, proxies=proxies)
+            try:
+                self.after(0, lambda: self._test_done(alive, detail))
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_done(self, alive, detail):
+        self.test_button.configure(state="normal")
+        if not self.winfo_exists():
+            return
+        self.test_result.configure(
+            text=("Online" if alive else "Failed") + f" - {detail}",
+            foreground=("#5fbf6f" if alive else "#e05555"),
+        )
 
 
 class CreateRepositoryDialog(tk.Toplevel):
@@ -2307,7 +3481,9 @@ class CreateRepositoryDialog(tk.Toplevel):
 
         scale = getattr(parent, "_ui_scale", 1.0)
         self.title("Create Repository")
-        self.geometry(f"{int(680 * scale)}x{int(660 * scale)}")
+        # No fixed geometry: the window sizes itself to its DPI-scaled
+        # content (which is what makes scaling correct at every DPI);
+        # minsize only guarantees a comfortable minimum.
         self.minsize(int(580 * scale), int(560 * scale))
         self.configure(bg=IAInteractGUI.COLOR_BG)
         self.transient(parent)
@@ -2320,11 +3496,18 @@ class CreateRepositoryDialog(tk.Toplevel):
         self.collection_var = tk.StringVar()
         self.language_var = tk.StringVar(value="")
         self.license_var = tk.StringVar(value=IA_LICENSES[0][0])
+        # Derivative generation: OFF by stock - archive.org's auto-transcodes
+        # are annoying for users who upload already-final files. When off,
+        # uploads send x-archive-queue-derive: 0 (IA's documented opt-out;
+        # the same thing `ia upload --no-derive` does). Derives can always be
+        # started later from the item's "Item Manager" page.
+        self.derive_var = tk.BooleanVar(value=False)
 
         self._build_ui()
         self.title_var.trace_add("write", lambda *_: self._update_ident_note())
         self.identifier_var.trace_add("write", lambda *_: self._update_ident_note())
 
+        parent.center_dialog(self)
         try:
             self.wait_visibility()
         except tk.TclError:
@@ -2411,6 +3594,20 @@ class CreateRepositoryDialog(tk.Toplevel):
         )
         self.license_combo.grid(row=3, column=1, sticky="ew", pady=(0, 6))
 
+        ttk.Label(optional, text="Derivatives", style="Card.TLabel").grid(row=4, column=0, sticky="w", pady=(0, 6))
+        derive_row = ttk.Frame(optional, style="Card.TFrame")
+        derive_row.grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Checkbutton(
+            derive_row,
+            text="Generate derivatives on archive.org (transcodes etc.)",
+            variable=self.derive_var,
+            style="Card.TCheckbutton",
+        ).pack(side="left")
+        ttk.Label(
+            derive_row, text="off = upload as-is (can derive later from the item's page)",
+            style="MutedCard.TLabel",
+        ).pack(side="left", padx=(8, 0))
+
         custom = ttk.LabelFrame(
             root, text="Additional metadata (any key : value pair the item should carry)",
             padding=10, style="Card.TLabelframe",
@@ -2494,7 +3691,7 @@ class CreateRepositoryDialog(tk.Toplevel):
         self._set_note(f"Checking availability of '{ident}'\u2026", IAInteractGUI.COLOR_MUTED)
 
         def worker():
-            exists = identifier_exists(ident)
+            exists = identifier_exists(ident, proxies=self.parent_gui._proxies())
             try:
                 self.after(0, lambda: self._avail_check_done(ident, exists))
             except RuntimeError:
@@ -2586,7 +3783,7 @@ class CreateRepositoryDialog(tk.Toplevel):
             )
             return
 
-        exists = identifier_exists(identifier)
+        exists = identifier_exists(identifier, proxies=parent._proxies())
         if exists:
             messagebox.showerror(
                 "Identifier taken",
@@ -2609,7 +3806,10 @@ class CreateRepositoryDialog(tk.Toplevel):
         started = parent._submit_ia_action(
             "create",
             f"create '{identifier}' with {len(files_to_upload)} file(s)",
-            lambda: parent._start_create_repository(identifier, metadata, files_to_upload),
+            lambda: parent._start_create_repository(
+                identifier, metadata, files_to_upload, queue_derive=self.derive_var.get(),
+                skip_existing=parent.skip_existing_var.get(),
+            ),
         )
         self.result = identifier
         if started:
@@ -2645,6 +3845,7 @@ class AccountManagerDialog(tk.Toplevel):
 
         self._build_ui()
         self._refresh_list()
+        parent.center_dialog(self)
         try:
             self.wait_visibility()
         except tk.TclError:
@@ -2901,6 +4102,7 @@ class RepositoriesDialog(tk.Toplevel):
         )
 
         self._build_ui()
+        parent.center_dialog(self)
         try:
             self.wait_visibility()
         except tk.TclError:
@@ -3158,6 +4360,8 @@ class UpdateDialog(tk.Toplevel):
         if ia_update is None or parent_store is None or not parent_store.get_last_release_tag():
             self.after(100, self._check_now)
 
+        if isinstance(parent, IAInteractGUI):
+            parent.center_dialog(self)
         try:
             self.wait_visibility()
         except tk.TclError:
