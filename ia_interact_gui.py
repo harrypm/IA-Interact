@@ -86,6 +86,18 @@ def _enable_windows_dpi_awareness():
         pass
 
 
+def _resource_path(relative_path):
+    """Absolute path to a bundled resource, working from source and frozen.
+
+    In a PyInstaller bundle, data files (--add-data) land under sys._MEIPASS;
+    from a source checkout they resolve relative to this file.
+    """
+    import sys
+    if getattr(sys, "_MEIPASS", None):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
+
+
 def _fmt_bytes(n):
     if n is None:
         return "?"
@@ -126,6 +138,90 @@ def enumerate_folder_files(folder_path):
 
 
 SCRAPE_URL = "https://archive.org/services/search/v1/scrape"
+
+# (label, collection identifier) for the Create Repository page. Collection
+# implies the mediatype on archive.org, so no separate mediatype is sent.
+IA_COLLECTIONS = [
+    ("Community data", "opensource_media"),
+    ("Community texts", "opensource"),
+    ("Community audio", "opensource_audio"),
+    ("Community video", "opensource_movies"),
+    ("Community software", "open_source_software"),
+    ("Community images", "opensource_image"),
+    ("Test collection (item is deleted after 30 days)", "test_collection"),
+]
+
+# (label, licenseurl)
+IA_LICENSES = [
+    ("No license selected", ""),
+    ("CC0 1.0 Universal (public domain dedication)", "https://creativecommons.org/publicdomain/zero/1.0/"),
+    ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/"),
+    ("CC BY-SA 4.0", "https://creativecommons.org/licenses/by-sa/4.0/"),
+    ("CC BY-NC 4.0", "https://creativecommons.org/licenses/by-nc/4.0/"),
+    ("CC BY-NC-SA 4.0", "https://creativecommons.org/licenses/by-nc-sa/4.0/"),
+    ("CC BY-ND 4.0", "https://creativecommons.org/licenses/by-nd/4.0/"),
+    ("GPL-3.0", "https://www.gnu.org/licenses/gpl-3.0.html"),
+    ("Public Domain Mark 1.0", "https://creativecommons.org/publicdomain/mark/1.0/"),
+]
+
+IA_LANGUAGES = [
+    "", "German", "English", "French", "Spanish", "Italian",
+    "Dutch", "Portuguese", "Russian", "Japanese", "Chinese",
+]
+
+# archive.org identifier rules: 5-100 chars, alphanumeric plus ._-,
+# must start with an alphanumeric character.
+IA_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{4,99}$")
+
+
+def slugify_identifier(title):
+    """Suggest an archive.org identifier from a title (ia-gui style)."""
+    slug = (title or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9._-]+", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-._")
+    return slug[:100]
+
+
+def identifier_valid(identifier):
+    return bool(IA_IDENTIFIER_RE.match(identifier or ""))
+
+
+# Lightweight reachability probe for the status indicator. A small, stable
+# metadata item; 200 means the archive.org API is serving requests.
+IA_HEALTH_URL = "https://archive.org/metadata/nasa"
+
+
+def check_ia_alive(timeout=6):
+    """Probe archive.org reachability. Returns (alive, detail)."""
+    try:
+        response = requests.get(IA_HEALTH_URL, timeout=timeout)
+    except requests.RequestException as exc:
+        return False, str(exc)
+    if response.status_code == 200:
+        return True, "archive.org is reachable"
+    return False, f"HTTP {response.status_code} {response.reason}"
+
+
+def identifier_exists(identifier, timeout=(6, 30)):
+    """True when the identifier already exists on archive.org.
+
+    The metadata API answers HTTP 200 with an empty JSON object for
+    nonexistent items, so the parsed payload must be checked (not the code).
+    """
+    try:
+        response = requests.get(
+            f"https://archive.org/metadata/{quote(identifier)}", timeout=timeout
+        )
+    except requests.RequestException:
+        return None  # network problem: unknown, not taken
+    if response.status_code != 200:
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    return bool(isinstance(metadata, dict) and metadata.get("identifier"))
 
 
 def extract_screenname(value):
@@ -401,6 +497,7 @@ class IAInteractGUI(tk.Tk):
     def __init__(self):
         _enable_windows_dpi_awareness()
         super().__init__()
+        self._set_window_icon()
         self._ui_scale = 1.0
         self._configure_scaling()
         # Row counts are DPI-adaptive so the fixed parts of the layout keep
@@ -452,6 +549,17 @@ class IAInteractGUI(tk.Tk):
         self.current_profile = None
 
         self.cancel_event = threading.Event()
+
+        # IA status indicator + offline action queue (see _ia_* methods).
+        self._ia_alive = None          # None=unknown, True/False from last check
+        self._ia_check_running = False
+        self._ia_check_scheduled = False
+        self._ia_last_checked = 0.0
+        self._ia_action_queue = []     # FIFO: {kind, description, starter, queued_at}
+        self.ia_status_label = None
+        self._ia_queue_frame = None
+        self._ia_queue_listbox = None
+
         self.profile_combobox = None
         self.current_profile_label = None
         self.progress_bar = None
@@ -469,6 +577,21 @@ class IAInteractGUI(tk.Tk):
 
         self._build_menu()
         self._build_login_screen()
+
+    def _set_window_icon(self):
+        """Show the Internet Archive logo in the title bar and taskbar.
+
+        iconphoto(True, ...) also applies to every Toplevel opened from this
+        root (account manager, create-repository page, ...). PNG works on
+        all platforms with Tk 8.6+; silently skipped if the asset is missing.
+        """
+        try:
+            icon_path = _resource_path(os.path.join("assets", "icons", "internet-archive.png"))
+            if os.path.exists(icon_path):
+                self._icon_photo = tk.PhotoImage(file=icon_path)
+                self.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass  # icon is cosmetic; never block startup on it
 
     def _configure_scaling(self):
         """Compute the UI pixel scale factor from the display's real DPI.
@@ -764,6 +887,14 @@ class IAInteractGUI(tk.Tk):
             style="TLabel",
         )
         self.current_profile_label.pack(side="left")
+
+        self.ia_status_label = ttk.Label(account_bar, text="IA: checking\u2026", style="MutedCard.TLabel")
+        self.ia_status_label.pack(side="left", padx=(14, 0))
+        self.ia_status_label.bind("<Button-1>", lambda event: self._ia_check_now())
+
+        ttk.Button(
+            account_bar, text="Create Repository", command=self._open_create_repository_dialog
+        ).pack(side="right", padx=(0, 8))
         ttk.Button(
             account_bar, text="Browse Repositories", command=self._open_repositories_page
         ).pack(side="right", padx=(0, 8))
@@ -881,6 +1012,24 @@ class IAInteractGUI(tk.Tk):
         self.download_button = ttk.Button(action_frame, text="Download Selected Repository Files", command=self.download_selected_repository_files, style="Accent.TButton")
         self.download_button.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
+        # Queued actions panel: shown only while actions wait for archive.org
+        # to come back online (see _submit_ia_action / _refresh_ia_queue_ui).
+        self._ia_queue_frame = ttk.LabelFrame(
+            self.main_frame, text="Queued - waiting for archive.org", padding=8, style="Card.TLabelframe"
+        )
+        self._ia_queue_listbox = tk.Listbox(
+            self._ia_queue_frame, selectmode=tk.EXTENDED, exportselection=False,
+            activestyle="none", height=4,
+        )
+        self._apply_dark_text_widget_theme(self._ia_queue_listbox)
+        self._ia_queue_listbox.pack(side="left", fill="both", expand=True)
+        queue_buttons = ttk.Frame(self._ia_queue_frame, style="TFrame")
+        queue_buttons.pack(side="left", anchor="n", padx=(8, 0))
+        ttk.Button(queue_buttons, text="Try now", command=self._ia_check_now).pack(anchor="e")
+        ttk.Button(
+            queue_buttons, text="Remove selected", command=self._remove_queued_ia_actions
+        ).pack(anchor="e", pady=(4, 0))
+
         progress_frame = ttk.LabelFrame(self.main_frame, text="Progress", padding=8, style="Card.TLabelframe")
         progress_frame.pack(fill="x", pady=(8, 0))
         progress_frame.columnconfigure(0, weight=1)
@@ -918,6 +1067,10 @@ class IAInteractGUI(tk.Tk):
         # Auto-list this account's repositories from the profile's saved IA
         # screenname (no typing needed).
         self.refresh_account_repositories()
+
+        # First IA reachability check shortly after the main screen exists;
+        # the indicator then refreshes itself on an adaptive schedule.
+        self.after(300, self._ia_check_now)
 
         # Defer the automatic background update check until the main screen
         # (and its status log) exist so any "update available" notice has
@@ -1270,6 +1423,279 @@ class IAInteractGUI(tk.Tk):
         self.append_status(f"Switched to account '{profile_name}'.")
         self.refresh_account_repositories()
         return True
+
+    # ---------------- IA status indicator + offline action queue ----------------
+
+    def _ia_check_now(self, event=None):
+        """Run an archive.org reachability check in the background now."""
+        if self._ia_check_running:
+            return
+        self._ia_check_running = True
+        self._set_ia_indicator(checking=True)
+
+        def worker():
+            alive, detail = check_ia_alive()
+            try:
+                self.after(0, lambda: self._ia_check_done(alive, detail))
+            except RuntimeError:
+                pass  # app is shutting down (mainloop gone)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ia_check_done(self, alive, detail):
+        self._ia_check_running = False
+        previous = self._ia_alive
+        self._ia_alive = alive
+        self._ia_last_checked = time.time()
+        self._set_ia_indicator(alive=alive, detail=detail)
+        if previous is not None and previous != alive:
+            self.append_status(
+                "archive.org is reachable again (IA: Online)."
+                if alive
+                else "archive.org became unreachable (IA: Offline) - new actions will be queued."
+            )
+        if alive and self._ia_action_queue:
+            self._drain_ia_queue()
+        self._schedule_ia_check()
+
+    def _schedule_ia_check(self):
+        """Schedule the next reachability check.
+
+        Polls fast (20s) while offline or while actions sit queued, slow
+        (5 min) once things are known-good.
+        """
+        if self._ia_check_scheduled:
+            return
+        if self._ia_action_queue or self._ia_alive is False:
+            interval = 20_000
+        else:
+            interval = 300_000
+
+        def fire():
+            self._ia_check_scheduled = False
+            self._ia_check_now()
+
+        self._ia_check_scheduled = True
+        self.after(interval, fire)
+
+    def _set_ia_indicator(self, checking=False, alive=None, detail=""):
+        if self.ia_status_label is None:
+            return
+        if checking:
+            self.ia_status_label.configure(
+                text="IA: checking\u2026", foreground=self.COLOR_MUTED
+            )
+            return
+        if alive:
+            self.ia_status_label.configure(text="IA: Online", foreground="#5fbf6f")
+        else:
+            self.ia_status_label.configure(text="IA: Offline", foreground="#e05555")
+
+    def _submit_ia_action(self, kind, description, starter):
+        """Run an IA action now, or queue it while archive.org is unreachable.
+
+        Returns True when the action was started immediately; False when it
+        was queued and will start automatically once IA is back online.
+        """
+        if self._ia_alive is False:
+            self._ia_action_queue.append(
+                {
+                    "kind": kind,
+                    "description": description,
+                    "starter": starter,
+                    "queued_at": time.time(),
+                }
+            )
+            self._refresh_ia_queue_ui()
+            self.append_status(
+                f"archive.org is not reachable - queued {kind}: {description}. "
+                "It will start automatically once IA is back online."
+            )
+            self._ia_check_now()
+            return False
+        if self._ia_alive is None:
+            # Status unknown (e.g. acting before the first check finished):
+            # queue and immediately probe, then drain if the probe succeeds.
+            self._ia_action_queue.append(
+                {
+                    "kind": kind,
+                    "description": description,
+                    "starter": starter,
+                    "queued_at": time.time(),
+                }
+            )
+            self._refresh_ia_queue_ui()
+            self._ia_check_now()
+            return False
+        return starter()
+
+    def _drain_ia_queue(self):
+        queued = self._ia_action_queue
+        self._ia_action_queue = []
+        self._refresh_ia_queue_ui()
+        for item in queued:
+            self.append_status(
+                f"archive.org is back online - starting queued {item['kind']}: "
+                f"{item['description']}"
+            )
+            try:
+                item["starter"]()
+            except Exception as exc:
+                self.append_status(
+                    f"Queued {item['kind']} failed to start: {exc}"
+                )
+
+    def _remove_queued_ia_actions(self):
+        if self._ia_queue_listbox is None:
+            return
+        for index in reversed(list(self._ia_queue_listbox.curselection())):
+            if 0 <= index < len(self._ia_action_queue):
+                del self._ia_action_queue[index]
+        self._refresh_ia_queue_ui()
+
+    def _refresh_ia_queue_ui(self):
+        if self._ia_queue_frame is None or self._ia_queue_listbox is None:
+            return
+        count = len(self._ia_action_queue)
+        self._ia_queue_listbox.delete(0, "end")
+        for item in self._ia_action_queue:
+            self._ia_queue_listbox.insert("end", f"[{item['kind']}] {item['description']}")
+        if count:
+            self._ia_queue_frame.pack(
+                fill="x", padx=(0, 0), pady=(8, 0), after=self.download_button.master
+            )
+            self._ia_queue_frame.configure(
+                text=f"Queued - waiting for archive.org ({count})"
+            )
+        else:
+            self._ia_queue_frame.pack_forget()
+
+    def _open_create_repository_dialog(self):
+        CreateRepositoryDialog(self)
+
+    def _start_upload(self, identifier, files_to_upload, target_directory):
+        self.append_status(
+            f"Starting upload of {len(files_to_upload)} file(s) to '{identifier}' "
+            f"directory '{target_directory or '(root)'}'."
+        )
+
+        def worker():
+            reporter = _ProgressReporter(self, len(files_to_upload), "upload")
+            success_count = 0
+            for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
+                if self.cancel_event.is_set():
+                    self.append_status("Upload cancelled by user.")
+                    break
+                ok, detail = self.upload_single_file(identifier, file_path, remote_rel, target_directory, reporter, index)
+                self.append_status(detail)
+                reporter.finish_file()
+                if ok:
+                    success_count += 1
+            cancelled = self.cancel_event.is_set()
+            self._set_transfer_running(False)
+            if not cancelled:
+                self.append_status(f"Upload complete: {success_count}/{len(files_to_upload)} succeeded.")
+            reporter.idle("Cancelled" if cancelled else "Idle")
+
+        self.cancel_event.clear()
+        self._set_transfer_running(True)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_download(self, identifier, selected_files, destination_dir):
+        self.append_status(f"Starting download of {len(selected_files)} file(s) to '{destination_dir}'.")
+
+        def worker():
+            reporter = _ProgressReporter(self, len(selected_files), "download")
+            success_count = 0
+            for index, file_name in enumerate(selected_files, start=1):
+                if self.cancel_event.is_set():
+                    self.append_status("Download cancelled by user.")
+                    break
+                ok, detail = self.download_single_file(identifier, file_name, destination_dir, reporter, index)
+                self.append_status(detail)
+                reporter.finish_file()
+                if ok:
+                    success_count += 1
+            cancelled = self.cancel_event.is_set()
+            self._set_transfer_running(False)
+            if not cancelled:
+                self.append_status(f"Download complete: {success_count}/{len(selected_files)} succeeded.")
+            reporter.idle("Cancelled" if cancelled else "Idle")
+
+        self.cancel_event.clear()
+        self._set_transfer_running(True)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_create_repository(self, identifier, metadata, files_to_upload):
+        """Create a new item: upload the files (auto-makes the bucket), then
+        POST the item metadata - the same flow as the CLI's create option."""
+        self.repo_var.set(identifier)
+        self.current_identifier = identifier
+        self.append_status(
+            f"Creating repository '{identifier}' with {len(files_to_upload)} file(s)..."
+        )
+
+        def worker():
+            # Re-verify availability at run time: for a queued creation the
+            # check made in the dialog may be minutes old (or was skipped
+            # because archive.org was unreachable).
+            if identifier_exists(identifier):
+                self._set_transfer_running(False)
+                self.append_status(
+                    f"Repository creation aborted: '{identifier}' already exists on archive.org."
+                )
+                return
+            reporter = _ProgressReporter(self, len(files_to_upload), "create")
+            success_count = 0
+            for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
+                if self.cancel_event.is_set():
+                    self.append_status("Repository creation cancelled by user.")
+                    break
+                ok, detail = self.upload_single_file(identifier, file_path, remote_rel, "", reporter, index)
+                self.append_status(detail)
+                reporter.finish_file()
+                if ok:
+                    success_count += 1
+            cancelled = self.cancel_event.is_set()
+            if cancelled:
+                self._set_transfer_running(False)
+                reporter.idle("Cancelled")
+                return
+            if success_count < len(files_to_upload):
+                self._set_transfer_running(False)
+                self.append_status(
+                    f"Repository creation incomplete: {success_count}/{len(files_to_upload)} files uploaded; metadata not submitted."
+                )
+                reporter.idle("Idle")
+                return
+            self.append_status("All files uploaded - submitting item metadata...")
+            try:
+                response = requests.post(
+                    f"https://archive.org/metadata/{identifier}/metadata",
+                    data=metadata,
+                    timeout=(30, 120),
+                )
+            except requests.RequestException as exc:
+                self._set_transfer_running(False)
+                self.append_status(f"Metadata submission failed for '{identifier}': {exc}")
+                reporter.idle("Idle")
+                return
+            if response.status_code == 200:
+                self.append_status(
+                    f"Repository '{identifier}' created with {success_count} file(s) and metadata."
+                )
+            else:
+                self.append_status(
+                    f"Files uploaded but metadata submission failed for '{identifier}': "
+                    f"{response.status_code} {response.reason}"
+                )
+            self._set_transfer_running(False)
+            self.after(0, self.load_repository_files)
+            reporter.idle("Idle")
+
+        self.cancel_event.clear()
+        self._set_transfer_running(True)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _set_remote_files(self, files):
         self.remote_files = files
@@ -1731,32 +2157,11 @@ class IAInteractGUI(tk.Tk):
             for entry in self.local_files
         ]
 
-        self.append_status(
-            f"Starting upload of {len(files_to_upload)} file(s) to '{identifier}' "
-            f"directory '{target_directory or '(root)'}'."
+        self._submit_ia_action(
+            "upload",
+            f"upload {len(files_to_upload)} file(s) to '{identifier}'",
+            lambda: self._start_upload(identifier, files_to_upload, target_directory),
         )
-
-        def worker():
-            reporter = _ProgressReporter(self, len(files_to_upload), "upload")
-            success_count = 0
-            for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
-                if self.cancel_event.is_set():
-                    self.append_status("Upload cancelled by user.")
-                    break
-                ok, detail = self.upload_single_file(identifier, file_path, remote_rel, target_directory, reporter, index)
-                self.append_status(detail)
-                reporter.finish_file()
-                if ok:
-                    success_count += 1
-            cancelled = self.cancel_event.is_set()
-            self._set_transfer_running(False)
-            if not cancelled:
-                self.append_status(f"Upload complete: {success_count}/{len(files_to_upload)} succeeded.")
-            reporter.idle("Cancelled" if cancelled else "Idle")
-
-        self.cancel_event.clear()
-        self._set_transfer_running(True)
-        threading.Thread(target=worker, daemon=True).start()
 
     def upload_single_file(self, identifier, file_path, object_rel_path, directory, reporter=None, file_index=1):
         """Upload one local file to the repository.
@@ -1827,29 +2232,12 @@ class IAInteractGUI(tk.Tk):
         destination_dir = filedialog.askdirectory(title="Select destination folder")
         if not destination_dir:
             return
-        self.append_status(f"Starting download of {len(selected_files)} file(s) to '{destination_dir}'.")
 
-        def worker():
-            reporter = _ProgressReporter(self, len(selected_files), "download")
-            success_count = 0
-            for index, file_name in enumerate(selected_files, start=1):
-                if self.cancel_event.is_set():
-                    self.append_status("Download cancelled by user.")
-                    break
-                ok, detail = self.download_single_file(identifier, file_name, destination_dir, reporter, index)
-                self.append_status(detail)
-                reporter.finish_file()
-                if ok:
-                    success_count += 1
-            cancelled = self.cancel_event.is_set()
-            self._set_transfer_running(False)
-            if not cancelled:
-                self.append_status(f"Download complete: {success_count}/{len(selected_files)} succeeded.")
-            reporter.idle("Cancelled" if cancelled else "Idle")
-
-        self.cancel_event.clear()
-        self._set_transfer_running(True)
-        threading.Thread(target=worker, daemon=True).start()
+        self._submit_ia_action(
+            "download",
+            f"download {len(selected_files)} file(s) from '{identifier}'",
+            lambda: self._start_download(identifier, selected_files, destination_dir),
+        )
 
     def download_single_file(self, identifier, file_name, destination_dir, reporter=None, file_index=1):
         safe_relative_path = os.path.normpath(file_name).lstrip("/\\")
@@ -1897,6 +2285,337 @@ class IAInteractGUI(tk.Tk):
             return False, f"Download cancelled: {file_name}"
 
         return True, f"Downloaded: {output_path}"
+
+
+class CreateRepositoryDialog(tk.Toplevel):
+    """Create a new Internet Archive item from the current Local Files list.
+
+    Modeled on ia-gui's upload editor: required title / identifier /
+    description / subject tags / collection, optional creator, date,
+    language, license, and custom key:value metadata rows. Includes an
+    identifier availability check with slug auto-suggestion from the title.
+
+    The creation (and its uploads) goes through the main window's IA action
+    queue, so it waits automatically while archive.org is unreachable.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_gui = parent
+        self.result = None
+        self._avail_check_running = False
+
+        scale = getattr(parent, "_ui_scale", 1.0)
+        self.title("Create Repository")
+        self.geometry(f"{int(680 * scale)}x{int(660 * scale)}")
+        self.minsize(int(580 * scale), int(560 * scale))
+        self.configure(bg=IAInteractGUI.COLOR_BG)
+        self.transient(parent)
+
+        self.title_var = tk.StringVar()
+        self.identifier_var = tk.StringVar()
+        self.subjects_var = tk.StringVar()
+        self.creator_var = tk.StringVar()
+        self.date_var = tk.StringVar()
+        self.collection_var = tk.StringVar()
+        self.language_var = tk.StringVar(value="")
+        self.license_var = tk.StringVar(value=IA_LICENSES[0][0])
+
+        self._build_ui()
+        self.title_var.trace_add("write", lambda *_: self._update_ident_note())
+        self.identifier_var.trace_add("write", lambda *_: self._update_ident_note())
+
+        try:
+            self.wait_visibility()
+        except tk.TclError:
+            pass
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        try:
+            self.focus_set()
+        except tk.TclError:
+            pass
+
+    # ---------- UI ----------
+
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=12, style="TFrame")
+        root.pack(fill="both", expand=True)
+
+        required = ttk.LabelFrame(root, text="Required", padding=10, style="Card.TLabelframe")
+        required.pack(fill="x")
+        required.columnconfigure(1, weight=1)
+
+        ttk.Label(required, text="Title *", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        title_edit = ttk.Entry(required, textvariable=self.title_var)
+        title_edit.grid(row=0, column=1, sticky="ew", pady=(0, 6))
+
+        ttk.Label(required, text="Identifier *", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 2))
+        ident_row = ttk.Frame(required, style="Card.TFrame")
+        ident_row.grid(row=1, column=1, sticky="ew", pady=(0, 2))
+        ident_row.columnconfigure(0, weight=1)
+        ident_edit = ttk.Entry(ident_row, textvariable=self.identifier_var)
+        ident_edit.grid(row=0, column=0, sticky="ew")
+        ident_edit.configure(font="TkFixedFont")
+        ttk.Button(ident_row, text="Check", width=8, command=self._check_identifier).grid(row=0, column=1, padx=(8, 0))
+        self.identifier_note = tk.Label(
+            ident_row, text="", bg=IAInteractGUI.COLOR_PANEL, fg=IAInteractGUI.COLOR_MUTED,
+            font=("TkDefaultFont", 8), anchor="w", justify="left",
+        )
+        self.identifier_note.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        ttk.Label(required, text="Description *", style="Card.TLabel").grid(row=2, column=0, sticky="nw", pady=(6, 6))
+        self.description_edit = tk.Text(
+            required, height=5, wrap="word", bg=IAInteractGUI.COLOR_ENTRY, fg=IAInteractGUI.COLOR_TEXT,
+            insertbackground=IAInteractGUI.COLOR_TEXT, relief="flat", highlightthickness=1,
+            highlightbackground=IAInteractGUI.COLOR_BORDER, highlightcolor=IAInteractGUI.COLOR_ACCENT,
+            padx=6, pady=4,
+        )
+        self.description_edit.grid(row=2, column=1, sticky="ew", pady=(6, 6))
+
+        ttk.Label(required, text="Subject tags *", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(required, textvariable=self.subjects_var).grid(row=3, column=1, sticky="ew", pady=(0, 6))
+        ttk.Label(
+            required, text="comma-separated, e.g. minecraft, backup, german", style="MutedCard.TLabel"
+        ).grid(row=4, column=1, sticky="w", pady=(0, 6))
+
+        ttk.Label(required, text="Collection *", style="Card.TLabel").grid(row=5, column=0, sticky="w", pady=(0, 6))
+        self.collection_combo = ttk.Combobox(
+            required, textvariable=self.collection_var, values=[label for label, _ in IA_COLLECTIONS]
+        )
+        self.collection_combo.grid(row=5, column=1, sticky="ew", pady=(0, 6))
+
+        optional = ttk.LabelFrame(root, text="Optional", padding=10, style="Card.TLabelframe")
+        optional.pack(fill="x", pady=(8, 0))
+        optional.columnconfigure(1, weight=1)
+
+        ttk.Label(optional, text="Creator", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(optional, textvariable=self.creator_var).grid(row=0, column=1, sticky="ew", pady=(0, 6))
+
+        ttk.Label(optional, text="Date", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        ttk.Entry(optional, textvariable=self.date_var).grid(row=1, column=1, sticky="ew", pady=(0, 6))
+        ttk.Label(optional, text="YYYY-MM-DD (or partial: YYYY / YYYY-MM)", style="MutedCard.TLabel").grid(
+            row=1, column=2, sticky="w", padx=(8, 0)
+        )
+
+        ttk.Label(optional, text="Language", style="Card.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        self.language_combo = ttk.Combobox(optional, textvariable=self.language_var, values=IA_LANGUAGES)
+        self.language_combo.grid(row=2, column=1, sticky="ew", pady=(0, 6))
+
+        ttk.Label(optional, text="License", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
+        self.license_combo = ttk.Combobox(
+            optional, textvariable=self.license_var, values=[label for label, _ in IA_LICENSES],
+            state="readonly",
+        )
+        self.license_combo.grid(row=3, column=1, sticky="ew", pady=(0, 6))
+
+        custom = ttk.LabelFrame(
+            root, text="Additional metadata (any key : value pair the item should carry)",
+            padding=10, style="Card.TLabelframe",
+        )
+        custom.pack(fill="both", expand=True, pady=(8, 0))
+        self._custom_rows_frame = ttk.Frame(custom, style="TFrame")
+        self._custom_rows_frame.pack(fill="both", expand=True)
+        custom_buttons = ttk.Frame(custom, style="TFrame")
+        custom_buttons.pack(fill="x", pady=(6, 0))
+        ttk.Button(custom_buttons, text="Add field", command=self._add_custom_row).pack(side="left")
+        ttk.Button(custom_buttons, text="Remove selected", command=self._remove_custom_row).pack(side="left", padx=(8, 0))
+
+        buttons = ttk.Frame(root, style="TFrame")
+        buttons.pack(fill="x", pady=(12, 0))
+        file_count = len(self.parent_gui.local_files)
+        ttk.Label(
+            buttons,
+            text=(f"Will upload the {file_count} file(s) in the Local Files list" if file_count
+                  else "Local Files list is empty - add files first"),
+            style="MutedCard.TLabel",
+        ).pack(side="left")
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+        ttk.Button(
+            buttons, text="Create Repository", command=self._create, style="Accent.TButton"
+        ).pack(side="right", padx=(0, 8))
+
+        self._update_ident_note()
+
+    # ---------- custom metadata rows ----------
+
+    def _add_custom_row(self):
+        row = ttk.Frame(self._custom_rows_frame, style="TFrame")
+        row.pack(fill="x", pady=(0, 4))
+        key_edit = ttk.Entry(row)
+        key_edit.configure(font="TkFixedFont")
+        key_edit.pack(side="left", fill="x", expand=True)
+        ttk.Label(row, text=" = ", style="MutedCard.TLabel").pack(side="left")
+        value_edit = ttk.Entry(row)
+        value_edit.pack(side="left", fill="x", expand=True)
+        self._custom_rows_frame.row_frames = getattr(self._custom_rows_frame, "row_frames", []) + [(row, key_edit, value_edit)]
+
+    def _remove_custom_row(self):
+        rows = getattr(self._custom_rows_frame, "row_frames", [])
+        if rows:
+            row, _key_edit, _value_edit = rows[-1]
+            row.destroy()
+            self._custom_rows_frame.row_frames = rows[:-1]
+
+    # ---------- identifier helpers ----------
+
+    def _effective_identifier(self):
+        return self.identifier_var.get().strip() or slugify_identifier(self.title_var.get())
+
+    def _update_ident_note(self):
+        ident = self._effective_identifier()
+        if not ident:
+            text = "leave empty to derive the identifier from the title"
+            color = IAInteractGUI.COLOR_MUTED
+        elif not identifier_valid(ident):
+            text = f"invalid identifier: {ident!r} (5-100 chars; letters, digits, . _ -; must start with a letter or digit)"
+            color = "#e05555"
+        else:
+            text = f"archive.org/details/{ident}"
+            color = IAInteractGUI.COLOR_MUTED
+        self._set_note(text, color)
+
+    def _set_note(self, text, color):
+        try:
+            self.identifier_note.configure(text=text, fg=color)
+        except tk.TclError:
+            pass  # dialog closed while a background check was returning
+
+    def _check_identifier(self):
+        ident = self.identifier_var.get().strip()
+        if not identifier_valid(ident):
+            self._set_note("Fix the identifier first (see the rules below).", "#e05555")
+            return
+        if self._avail_check_running:
+            return
+        self._avail_check_running = True
+        self._set_note(f"Checking availability of '{ident}'\u2026", IAInteractGUI.COLOR_MUTED)
+
+        def worker():
+            exists = identifier_exists(ident)
+            try:
+                self.after(0, lambda: self._avail_check_done(ident, exists))
+            except RuntimeError:
+                pass  # dialog/app closed while the check was in flight
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _avail_check_done(self, ident, exists):
+        self._avail_check_running = False
+        if not self.winfo_exists():
+            return
+        if self.identifier_var.get().strip() != ident and slugify_identifier(self.title_var.get()) != ident:
+            return  # user edited the field meanwhile; ignore stale result
+        if exists is None:
+            self._set_note("Availability check failed (network error) - try again.", "#e0a855")
+        elif exists:
+            self._set_note(f"'{ident}' is already taken on archive.org.", "#e05555")
+        else:
+            self._set_note(f"'{ident}' is available.", "#5fbf6f")
+
+    # ---------- submit ----------
+
+    def _collect_metadata(self):
+        collection_text = self.collection_var.get().strip()
+        collection = collection_text
+        for label, ident in IA_COLLECTIONS:
+            if collection_text == label:
+                collection = ident
+                break
+        subjects = [s.strip() for s in self.subjects_var.get().split(",") if s.strip()]
+        license_url = ""
+        for label, url in IA_LICENSES:
+            if self.license_var.get() == label:
+                license_url = url
+                break
+        metadata = {
+            "title": self.title_var.get().strip(),
+            "description": self.description_edit.get("1.0", "end").strip(),
+            "subject": ", ".join(subjects),
+            "collection": collection,
+        }
+        creator = self.creator_var.get().strip()
+        if creator:
+            metadata["creator"] = creator
+        date = self.date_var.get().strip()
+        if date:
+            metadata["date"] = date
+        language = self.language_var.get().strip()
+        if language:
+            metadata["language"] = language
+        if license_url:
+            metadata["licenseurl"] = license_url
+        for row, key_edit, value_edit in getattr(self._custom_rows_frame, "row_frames", []):
+            key = key_edit.get().strip()
+            if key:
+                metadata[key] = value_edit.get().strip()
+        return metadata, subjects
+
+    def _create(self):
+        parent = self.parent_gui
+        metadata, subjects = self._collect_metadata()
+        identifier = self._effective_identifier()
+
+        if not metadata["title"]:
+            messagebox.showerror("Missing title", "A title is required.", parent=self)
+            return
+        if not identifier_valid(identifier):
+            messagebox.showerror(
+                "Invalid identifier",
+                "The identifier must be 5-100 characters using letters, digits, '.', '_' or '-', "
+                "and start with a letter or digit. Leave it empty to derive it from the title.",
+                parent=self,
+            )
+            return
+        if not metadata["description"]:
+            messagebox.showerror("Missing description", "A description is required.", parent=self)
+            return
+        if not subjects:
+            messagebox.showerror("Missing subject tags", "At least one subject tag is required.", parent=self)
+            return
+        if not metadata["collection"]:
+            messagebox.showerror("Missing collection", "Pick or enter a collection.", parent=self)
+            return
+        if not parent.local_files:
+            messagebox.showerror(
+                "No files selected",
+                "Repository creation uploads the files in the Local Files list. Add files first.",
+                parent=self,
+            )
+            return
+
+        exists = identifier_exists(identifier)
+        if exists:
+            messagebox.showerror(
+                "Identifier taken",
+                f"'{identifier}' already exists on archive.org. Pick another identifier.",
+                parent=self,
+            )
+            return
+        if exists is None:
+            # Unreachable right now: queue the whole creation; the identifier
+            # is re-verified when the queued action actually runs.
+            pass
+
+        # Resolve remote paths on the Tk thread before queueing so the
+        # creation thread never reads Tk variables.
+        files_to_upload = [
+            (entry["local_path"], parent._entry_remote_rel(entry))
+            for entry in parent.local_files
+        ]
+
+        started = parent._submit_ia_action(
+            "create",
+            f"create '{identifier}' with {len(files_to_upload)} file(s)",
+            lambda: parent._start_create_repository(identifier, metadata, files_to_upload),
+        )
+        self.result = identifier
+        if started:
+            self.destroy()
+        else:
+            self.destroy()  # queued: dialog closes, action runs when IA is back
 
 
 class AccountManagerDialog(tk.Toplevel):

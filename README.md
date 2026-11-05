@@ -48,6 +48,8 @@ Use this script to list files, upload files, download files, delete files, move 
 - **Basic GUI Mode:** Includes a login page for S3 keys, repository file list selection for download, and local file list selection for upload.
 - **Batch Folder Upload (GUI):** Add whole folders with the Add Folder button or by dragging & dropping them from your file manager; subfolder structure is preserved on upload.
 - **Account Repository Browser (GUI):** A My Repositories profile page lists every archive.org item uploaded by the account's screenname, so any repository can be selected and loaded with one click.
+- **Create Repository (GUI):** A Create Repository page (modeled on ia-gui's upload editor) builds a new item from the Local Files list: title, identifier with availability check and auto-suggestion from the title, description, subject tags, collection, optional creator / date / language / license, and custom key:value metadata.
+- **IA Status & Offline Queue (GUI):** The account bar shows a live IA: Online / IA: Offline indicator (click it to re-check). While archive.org is unreachable, upload, download and repository-creation actions are queued and start automatically once IA is back online.
 - **Folder Upload/Download (CLI):** Upload whole folders with their structure preserved, and download a single file, a whole folder, or everything from a directory-style listing.
 - **Single Launcher:** One executable supports both modes (CLI by default, GUI via `--gui`).
 - **Flexible Repository Input:** Accepts a plain identifier (for example `my_item`) or Archive URLs such as `/details/`, `/download/`, and `/metadata/`.
@@ -55,7 +57,7 @@ Use this script to list files, upload files, download files, delete files, move 
 - **Metadata Support:** Input metadata including title, description, creator, date, language, license URL, collection, subject tags, and test item status.
 - **Collection Options:** Supports collections such as `community`, `opensource`, `texts`, `movies`, `audio`, `image`, `etree`, `folksoundomy`, `games`, and `software`.
 - **Progress Bars:** Uses `tqdm` to display file upload progress.
-- **S3 Authentication:** Uses S3 access keys (set as environment variables) for secure communication with the Internet Archive.
+- **S3 Authentication:** Uses S3 access keys for secure communication with the Internet Archive, taken from environment variables or the active account profile saved by the GUI Account Manager.
 
 ## Prerequisites
 
@@ -134,7 +136,28 @@ Retrieve your S3 keys from [Internet Archive Account Page](https://archive.org/a
 
 **Set Up Environment Variables:**
 
-Edit your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`) and add:
+The variable names are exactly `S3_ACCESS_KEY` and `S3_SECRET_KEY` (`IA_ACCESS_KEY` / `IA_SECRET_KEY` are also accepted as aliases). They are their own variables - do **not** paste the keys into the existing `PATH` variable; `PATH` only tells the OS where to find programs.
+
+*Windows* (applies to the pre-built `ia-interact-windows-x86_64.exe` too):
+
+Option A - graphical (permanent):
+1. Start Menu -> search "Edit environment variables for your account" -> open it.
+2. Click **New** under *User variables* -> name: `S3_ACCESS_KEY`, value: your access key. Repeat with `S3_SECRET_KEY`.
+3. Fully close and re-open any terminal, or re-launch the `.exe` (already-open windows keep the old environment).
+
+Option B - Command Prompt (permanent for new terminals):
+
+    setx S3_ACCESS_KEY "your-access-key"
+    setx S3_SECRET_KEY "your-secret-key"
+
+Then close and re-open the terminal before running the app again.
+
+Option C - PowerShell (current session only):
+
+    $env:S3_ACCESS_KEY = "your-access-key"
+    $env:S3_SECRET_KEY = "your-secret-key"
+
+*macOS / Linux:* edit your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`) and add:
 
 
     export S3_ACCESS_KEY="your-access-key"
@@ -149,9 +172,15 @@ Replace `"your-access-key"` and `"your-secret-key"` with your actual keys.
 
 **Test the Environment Variables:**
 
+*macOS / Linux:*
 
     echo $S3_ACCESS_KEY
     echo $S3_SECRET_KEY
+
+*Windows (PowerShell):*
+
+    echo $env:S3_ACCESS_KEY
+    echo $env:S3_SECRET_KEY
 ### 5. Build Local Portable Binaries
 
 Install build dependencies:
@@ -265,6 +294,8 @@ GUI flow:
    - Upload can start directly from a valid repository field value.
    - Download requires a loaded repository file list.
    - Upload sends every file in the local list (use Remove Selected / Clear to trim it first); a warning is logged if two queued files would land on the same repository path.
+6. **Create Repository** (account bar) opens a creation page that builds a new item from the Local Files list: title, identifier (auto-suggested from the title, validated against archive.org's identifier rules, with a **Check** button for availability), description, subject tags, collection (or a custom collection identifier), optional creator / date / language / license, and custom key:value metadata. Submitting uploads the files and submits the metadata in one step.
+7. The **IA: Online / IA: Offline** indicator in the account bar shows archive.org reachability (click to re-check). While IA is offline, upload / download / create actions are queued in the **Queued - waiting for archive.org** panel and start automatically once IA is reachable again; **Try now** forces an immediate check, **Remove selected** drops queued items.
 
 ### 9. Account Profiles (S3 key manager)
 
@@ -276,6 +307,7 @@ The GUI can save named S3 account profiles so you do not have to re-enter keys e
 - The **IA screenname** is the username part of your archive.org profile URL (for example `archive.org/details/@yourname`); it is case-sensitive. It is only needed for the My Repositories page.
 - **My Repositories** is integrated into the main window: the Repository panel's list view shows every archive.org item uploaded by the active account, auto-loaded from the profile's saved **IA screenname** as soon as you log in or switch accounts (**Refresh** re-loads it; double-clicking an entry fills the Repository field and loads that item's file list; saved-only items are tagged `[saved]`). If the profile has no screenname the list shows a hint instead. **Browse Repositories** (account bar) opens the full page with a filter box: enter one or more screennames separated by commas (`@names` and full profile URLs like `archive.org/details/@name` also work); both uploader search forms are combined so items appear no matter which uploader field they carry, wrong-case names are retried in lowercase, and items the account saved (favorites) can be included via **Include saved items**. **Use Selected** (or double-click) loads the chosen repository; **Open in Browser** shows its details page. After a successful load the screenname list is saved back to the profile, which also refreshes the main-window list view.
 - Profiles are stored in `~/.config/ia-interact/accounts.json` (or `$XDG_CONFIG_HOME/ia-interact/accounts.json`) with `0600` permissions; the directory is `0700`.
+- The CLI also reads the **active saved profile**: if `S3_ACCESS_KEY` / `S3_SECRET_KEY` are not set in the environment, CLI operations use the keys of the profile selected in the GUI Account Manager, so keys entered once in the GUI work in the `.exe` / CLI too.
 - Keys are stored in plaintext. Rely on home-directory / full-disk encryption for protection at rest, and do not store keys on shared machines.
 
 ### 10. Progress Readout
@@ -321,7 +353,7 @@ From the same AppImage, run GUI mode:
 
     ./release/ia-interact-linux-x86_64.AppImage --gui
 
-When opened/clicked from a desktop environment, the packaged app defaults to GUI mode.
+The packaged app defaults to GUI mode on any stock launch (Explorer double-click, Start-Process, desktop launcher, or a plain run with no flags). Use `--cli` to get the interactive CLI menu, or pick option 8 inside the CLI to open the GUI.
 
 
 ### Script Options
@@ -334,6 +366,7 @@ When the script runs, it displays an interactive menu with the following options
 - **Download Files:** Download a single file, a whole folder, or all files from a repository's directory-style listing to a local folder.
 - **Delete/Move Files:** Manage files within a repository.
 - **Create a New Repository:** Upload an entire folder and configure repository metadata.
+- **Open the GUI (option 8):** Launch the graphical interface; a plain launch (no flags) opens the GUI by default, so this option is mainly handy when you are already in the CLI.
 
 During repository creation, you will be prompted to:
 - Input metadata (title, description, creator, date, language, license URL).
@@ -354,7 +387,7 @@ During repository creation, you will be prompted to:
 
 
 - **Environment Variables Not Set:**  
-  Ensure your environment variables are defined in your shell configuration file and reload it:
+  The variable names must be exactly `S3_ACCESS_KEY` and `S3_SECRET_KEY` (or `IA_ACCESS_KEY` / `IA_SECRET_KEY`) - putting the keys into `PATH` does nothing. On Windows, set them via `setx` (then open a new terminal) or via "Edit environment variables for your account"; already-open windows keep the old environment, so re-launch the app after changing them. On macOS/Linux, define them in your shell configuration file and reload it:
 
    source ~/.bashrc
 

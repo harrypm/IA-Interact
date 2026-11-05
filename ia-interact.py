@@ -135,6 +135,101 @@ def build_download_listing(file_paths):
     rows, _ = build(root, 0, "")
     return rows
 
+CREDENTIAL_PAIRS = (
+    ("S3_ACCESS_KEY", "S3_SECRET_KEY"),
+    ("IA_ACCESS_KEY", "IA_SECRET_KEY"),  # names used by archive.org's own tooling
+)
+
+def _env_credential_pair():
+    """Return the first complete (access_key, secret_key) pair found in env vars."""
+    for access_name, secret_name in CREDENTIAL_PAIRS:
+        access_key = os.getenv(access_name)
+        secret_key = os.getenv(secret_name)
+        if access_key and secret_key:
+            return access_key, secret_key
+    return None
+
+def _saved_profile_credential_pair():
+    """Return (access_key, secret_key) from the active saved GUI account profile.
+
+    The GUI stores named S3 account profiles in
+    ~/.config/ia-interact/accounts.json (see ia_accounts.py). Reusing them here
+    lets the CLI/.exe work with keys entered once in the GUI account manager.
+    """
+    try:
+        from ia_accounts import AccountStore
+        store = AccountStore()
+        store.load()
+        active = store.get_active()
+        if not active:
+            return None
+        profile = store.get_profile(active)
+        if not profile:
+            return None
+        access_key = profile.get("access_key")
+        secret_key = profile.get("secret_key")
+        if access_key and secret_key:
+            # Keep os.environ consistent for anything else reading the vars.
+            os.environ["S3_ACCESS_KEY"] = access_key
+            os.environ["S3_SECRET_KEY"] = secret_key
+            return access_key, secret_key
+    except Exception:
+        return None
+    return None
+
+def resolve_ia_credentials():
+    """Resolve IA S3 credentials, or print actionable instructions and return (None, None).
+
+    Lookup order:
+    1. S3_ACCESS_KEY / S3_SECRET_KEY environment variables
+    2. IA_ACCESS_KEY / IA_SECRET_KEY environment variables (archive.org tooling aliases)
+    3. The active account profile saved by the GUI account manager
+    """
+    pair = _env_credential_pair()
+    if pair:
+        return pair
+    # Detect a half-set pair (e.g. access key set but secret missing) so the
+    # error can point at the actual problem instead of a generic one.
+    partial = any(os.getenv(name) for pair_names in CREDENTIAL_PAIRS for name in pair_names)
+    pair = _saved_profile_credential_pair()
+    if pair:
+        return pair
+    _print_missing_credentials_error(partial=partial)
+    return None, None
+
+def _print_missing_credentials_error(partial=False):
+    if partial:
+        print("S3 credentials are incomplete: one of the key pair is set but the other is missing.")
+    else:
+        print("S3 access and secret keys are required but were not found.")
+    print(
+        """
+Set them as environment variables named S3_ACCESS_KEY and S3_SECRET_KEY
+(IA_ACCESS_KEY / IA_SECRET_KEY are also accepted).
+
+Note: these are NEW user/system variables - do NOT paste keys into the
+existing "PATH" variable; PATH only tells Windows where to find programs.
+
+  Windows (Command Prompt, permanent for new terminals):
+      setx S3_ACCESS_KEY "your-access-key"
+      setx S3_SECRET_KEY "your-secret-key"
+      ...then close and re-open the terminal / re-launch the .exe
+  Windows (PowerShell, current session only):
+      $env:S3_ACCESS_KEY = "your-access-key"
+      $env:S3_SECRET_KEY = "your-secret-key"
+  Windows (GUI): Start Menu -> "Edit environment variables for your account"
+      -> New -> name: S3_ACCESS_KEY, value: your-access-key (repeat for the secret)
+  macOS / Linux (~/.bashrc, ~/.zshrc, etc.):
+      export S3_ACCESS_KEY="your-access-key"
+      export S3_SECRET_KEY="your-secret-key"
+
+Alternatively, log in once with the GUI (ia-interact --gui) and save an
+account profile in the Account Manager; the CLI automatically reuses the
+active profile stored in ~/.config/ia-interact/accounts.json
+(on Windows: %USERPROFILE%\\.config\\ia-interact\\accounts.json).
+
+Get your keys from: https://archive.org/account/s3.php""")
+
 def upload_file_with_progress(identifier, file_path, directory, object_name=None):
     """
     Uploads a file to Internet Archive with progress tracking and retry logic.
@@ -143,10 +238,8 @@ def upload_file_with_progress(identifier, file_path, directory, object_name=None
     subdirectories are allowed for folder uploads); it defaults to the file's
     basename.
     """
-    access_key = os.getenv("S3_ACCESS_KEY")
-    secret_key = os.getenv("S3_SECRET_KEY")
+    access_key, secret_key = resolve_ia_credentials()
     if not access_key or not secret_key:
-        print("S3 access key or secret key is missing. Please set them as environment variables.")
         return False
 
     object_name = object_name or os.path.basename(file_path)
@@ -234,8 +327,7 @@ def delete_file(identifier, file_path):
     """
     Deletes a file from the repository via an HTTP DELETE request.
     """
-    access_key = os.getenv("S3_ACCESS_KEY")
-    secret_key = os.getenv("S3_SECRET_KEY")
+    access_key, secret_key = resolve_ia_credentials()
     if not access_key or not secret_key:
         print("S3 keys missing. Cannot delete file.")
         return False
@@ -261,8 +353,7 @@ def move_file(identifier, file_name, source_dir, target_dir):
     Moves a file within the repository by copying it to the target directory and deleting the original.
     Uses the x-amz-copy-source header for copying.
     """
-    access_key = os.getenv("S3_ACCESS_KEY")
-    secret_key = os.getenv("S3_SECRET_KEY")
+    access_key, secret_key = resolve_ia_credentials()
     if not access_key or not secret_key:
         print("S3 keys missing. Cannot move file.")
         return False
@@ -457,10 +548,8 @@ def initialize_repository(folder_path, identifier, metadata, mode):
     Uploads an entire folder as a new repository.
     In Test Mode, simulates the actions without uploading; otherwise, uploads each file via HTTP PUT.
     """
-    access_key = os.getenv("S3_ACCESS_KEY")
-    secret_key = os.getenv("S3_SECRET_KEY")
+    access_key, secret_key = resolve_ia_credentials()
     if not access_key or not secret_key:
-        print("S3 access key or secret key is missing. Please set them as environment variables.")
         return
 
     if mode == "Test":
@@ -535,9 +624,30 @@ Main Menu Options:
    - Upload an entire folder as a new repository with metadata and mode selection.
 7. Help:
    - Display this help information.
+8. Open the GUI:
+   - Launch the graphical interface (also the default for a plain launch).
 
 Instructions:
-- Ensure S3 credentials are set as environment variables.
+- Uploading, deleting and moving files needs Internet Archive S3 keys
+  (get them from https://archive.org/account/s3.php). Provide them either as
+  environment variables named S3_ACCESS_KEY and S3_SECRET_KEY
+  (IA_ACCESS_KEY / IA_SECRET_KEY also work):
+
+    Windows (cmd, permanent for new terminals):
+        setx S3_ACCESS_KEY "your-access-key"
+        setx S3_SECRET_KEY "your-secret-key"
+        (then close and re-open the terminal / re-launch the .exe)
+    Windows (PowerShell, current session only):
+        $env:S3_ACCESS_KEY = "your-access-key"
+        $env:S3_SECRET_KEY = "your-secret-key"
+    macOS / Linux:
+        export S3_ACCESS_KEY="your-access-key"
+        export S3_SECRET_KEY="your-secret-key"
+
+  These are their own variables - do NOT put the keys into "PATH".
+
+  Or save an account profile once via the GUI (ia-interact --gui) Account
+  Manager; this CLI then reuses the active profile automatically.
 - Follow the prompts for each option.
     """
     print(help_text)
@@ -556,9 +666,13 @@ def main():
     print("5. Download files from a repository")
     print("6. Create or access a repository from a folder")
     print("7. Help")
-    choice = input("Enter your choice (1-7): ").strip()
+    print("8. Open the GUI")
+    choice = input("Enter your choice (1-8): ").strip()
 
-    if choice == "7":
+    if choice == "8":
+        run_gui()
+        main()
+    elif choice == "7":
         print_help()
         main()
     elif choice == "6":
@@ -796,15 +910,11 @@ def select_launch_mode(args, explorer_launch=False):
     if args.cli:
         return "cli"
 
-    # A Windows console-exe double-clicked in Explorer gets an auto-allocated
-    # console (so isatty() is True), but the user clearly wants the GUI.
-    if explorer_launch:
-        return "gui"
-
-    interactive_terminal = sys.stdin.isatty() and sys.stdout.isatty()
-    if interactive_terminal:
-        return "cli"
-
+    # Stock launch (no flags) defaults to the GUI everywhere: Explorer
+    # double-click, Start-Process, desktop launcher, or a plain terminal run
+    # alike. The interactive CLI is opt-in via --cli, or via menu option 8
+    # once you are in it. (explorer_launch no longer changes the mode; it is
+    # still used to decide whether the throwaway console gets hidden.)
     has_graphical_session = (
         bool(os.environ.get("DISPLAY"))
         or bool(os.environ.get("WAYLAND_DISPLAY"))
@@ -816,24 +926,123 @@ def select_launch_mode(args, explorer_launch=False):
     return "cli"
 
 
-if __name__ == "__main__":
-    args = parse_args()
-    explorer_launch = _windows_launched_by_explorer()
-    if select_launch_mode(args, explorer_launch=explorer_launch) == "gui":
-        # Only hide the throwaway console for an Explorer (double-click) launch
-        # that auto-selected the GUI; never for an explicit --gui from a real
-        # terminal (that would yank the user's terminal window away).
-        hide_console = explorer_launch and not args.gui
-        if hide_console:
-            _windows_set_console_visible(False)
+def _windows_console_exclusive():
+    """True when the console is a fresh, empty throwaway terminal.
+
+    A console-subsystem exe launched outside a terminal (Explorer double-click,
+    Start-Process, desktop shortcut) gets a console allocated just for it;
+    a process started FROM a terminal shares that terminal's console with the
+    user's shell. In a PyInstaller onefile build the console legitimately
+    holds TWO of our own processes (bootloader + python child), so instead of
+    counting processes we check that every attached process runs OUR OWN
+    executable image. Used to auto-hide the empty console on GUI launches
+    without ever yanking away the user's own terminal.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetConsoleProcessList.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+        kernel32.GetConsoleProcessList.restype = wintypes.DWORD
+        buffer = (wintypes.DWORD * 64)()
+        count = int(kernel32.GetConsoleProcessList(buffer, 64))
+        if count <= 0:
+            return False
+        console_pids = {buffer[i] for i in range(min(count, 64))}
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        our_image = os.path.basename(sys.executable).lower()
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
         try:
-            from ia_interact_gui import main as gui_main
-            gui_main()
-        except Exception:
-            import traceback
-            if hide_console:
-                _windows_set_console_visible(True)
-            traceback.print_exc()
-            raise
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            pid_to_image = {}
+            if kernel32.Process32FirstW(ctypes.byref(entry)):
+                while True:
+                    pid_to_image[entry.th32ProcessID] = entry.szExeFile.lower()
+                    if not kernel32.Process32NextW(ctypes.byref(entry)):
+                        break
+        finally:
+            try:
+                kernel32.CloseHandle(snapshot)
+            except Exception:
+                pass
+        for pid in console_pids:
+            if pid_to_image.get(pid) != our_image:
+                return False  # a foreign process (user shell) shares this console
+        return True
+    except Exception:
+        return False
+
+def _windows_setup_console_for_cli():
+    """Give the CLI a working console in a windowed (PyInstaller --windowed)
+    build.
+
+    A windowed exe never allocates or inherits a console, which is what keeps
+    stock GUI launches free of an empty terminal window. When the user asks
+    for the CLI explicitly, attach to the calling terminal's console (so the
+    menu appears in their own shell window); if there is no parent console
+    (e.g. the exe was launched with --cli from a shortcut), allocate a fresh
+    one. Python's std streams are then re-pointed at the console handles.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ATTACH_PARENT_PROCESS = ctypes.c_ulong(0xFFFFFFFF)  # (DWORD)-1
+    if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+        if not kernel32.AllocConsole():
+            return  # no console possible; the CLI will fail on stdin later
+    try:
+        binary = getattr(os, "O_BINARY", 0)
+        conin = os.open("CONIN$", os.O_RDWR | binary)
+        conout = os.open("CONOUT$", os.O_RDWR | binary)
+        os.dup2(conin, 0)
+        os.dup2(conout, 1)
+        os.dup2(conout, 2)
+        sys.stdin = open(0, "r", encoding="utf-8", errors="replace", closefd=False)
+        sys.stdout = open(1, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)
+        sys.stderr = open(2, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)
+    except OSError:
+        pass
+
+def run_gui():
+    """Launch the GUI (windowed build: no console is ever created for it)."""
+    try:
+        from ia_interact_gui import main as gui_main
+        gui_main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise
+
+if __name__ == "__main__":
+    # In a windowed build the std streams are dead until a console is
+    # attached, so pre-scan the raw argv for anything that needs one (--help,
+    # --version, --cli) BEFORE argparse touches it. A stock launch touches
+    # no console at all, which is what keeps the GUI free of an empty
+    # terminal window.
+    argv = sys.argv[1:]
+    if sys.platform == "win32" and any(
+        flag in argv for flag in ("--cli", "--help", "--version")
+    ):
+        _windows_setup_console_for_cli()
+    args = parse_args()
+    if select_launch_mode(args) == "gui":
+        run_gui()
     else:
         main()

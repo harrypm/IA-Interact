@@ -84,7 +84,10 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          pyinstaller --clean --onefile --collect-all tkinterdnd2 --name ia-interact --icon assets/icons/internet-archive.ico ia-interact.py
+          # --windowed: the exe never allocates a console, so stock (GUI)
+          # launches show no empty terminal. The CLI attaches to the calling
+          # terminal (or allocates one) when run with --cli / --help / --version.
+          pyinstaller --clean --onefile --windowed --collect-all tkinterdnd2 --add-data "assets/icons/internet-archive.png;assets/icons" --name ia-interact --icon assets/icons/internet-archive.ico ia-interact.py
           New-Item -ItemType Directory -Path release -Force | Out-Null
           Copy-Item dist/ia-interact.exe "release/ia-interact-windows-${{ matrix.windows_arch_suffix }}.exe"
       - name: Build macOS .icns icon
@@ -100,7 +103,7 @@ jobs:
       - name: Build macOS universal .app bundle archive
         if: matrix.platform == 'macos'
         run: |
-          pyinstaller --clean --onedir --windowed --collect-all tkinterdnd2 --target-architecture universal2 --name ia-interact --icon build/internet-archive.icns ia-interact.py
+          pyinstaller --clean --onedir --windowed --collect-all tkinterdnd2 --add-data "assets/icons/internet-archive.png:assets/icons" --target-architecture universal2 --name ia-interact --icon build/internet-archive.icns ia-interact.py
           mkdir -p release
           ditto -c -k --sequesterRsrc --keepParent dist/ia-interact.app release/ia-interact-macos-universal.app.zip
 

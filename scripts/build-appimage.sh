@@ -53,6 +53,7 @@ fi
   --onefile \
   --icon "$ICON_PNG" \
   --collect-all tkinterdnd2 \
+  --add-data "$ICON_PNG:assets/icons" \
   --name ia-interact \
   --distpath "$DIST_DIR" \
   --workpath "$BUILD_DIR" \
