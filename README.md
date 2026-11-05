@@ -6,6 +6,20 @@ An interactive command-line tool for managing Internet Archive repositories.
 Use this script to list files, upload files, download files, delete files, move files, and create new repositories with detailed metadata input. 
 
 
+## Downloads
+
+
+See [Releases](https://github.com/harrypm/IA-Interact/releases) for self-contained binary's for Windows/macOS/Linux for X86 and ARM64
+
+
+## GUI
+
+
+<img width="1200" height="" alt="Screenshot from 2026-11-05 09-51-42" src="https://github.com/user-attachments/assets/8e0f9f9c-ee3a-408f-8975-13d5831a509a" />
+
+<img width="400" height="" alt="Screenshot from 2026-11-05 09-54-39" src="https://github.com/user-attachments/assets/42f2fcfa-62d4-42ce-98c9-cb62cc13131a" />
+
+
 ## Table of Contents
 
 - [Internet Archive Interact](#internet-archive-interact)
@@ -229,6 +243,8 @@ Build a Linux `.AppImage` (arm64):
 The arm64 AppImage will be output to:
 
     release/ia-interact-linux-aarch64.AppImage
+
+
 ### 6. GitHub Actions: Portable Releases
 
 This repository includes:
@@ -539,4 +555,4 @@ This script uses the Internet Archive’s S3-compatible interface and Metadata A
 # Creator Notes
 
 
-This script was built using Microsoft Copilot, and 5 hours of Harry Munday's lifespan, Enjoy. 
+This script was built using Microsoft Copilot, GLM 5.3, and 15 hours of Harry Munday's lifespan, Enjoy. 
