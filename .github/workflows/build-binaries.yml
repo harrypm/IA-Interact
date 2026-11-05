@@ -107,6 +107,19 @@ jobs:
           mkdir -p release
           ditto -c -k --sequesterRsrc --keepParent dist/ia-interact.app release/ia-interact-macos-universal.app.zip
 
+      - name: Capture GUI screenshots (x86_64 only)
+        if: matrix.target == 'windows-exe-x86_64'
+        shell: pwsh
+        run: |
+          python -m pip install pillow requests tqdm
+          python tests/capture_screenshots.py
+      - name: Upload screenshots artifact
+        if: matrix.target == 'windows-exe-x86_64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-screenshots
+          path: assets/screenshots/*.png
+          if-no-files-found: error
       - name: Upload portable artifact
         uses: actions/upload-artifact@v7
         with:

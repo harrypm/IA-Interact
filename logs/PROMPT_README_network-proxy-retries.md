@@ -193,9 +193,26 @@
   + generated changelog, all 5 assets rebuilt.
 - The in-app update-notes page IS in this release's exe now.
 
+## Follow-up 8: GUI screenshots + linked/validated downloads
+
+> GUI screenshots not just CLI
+> Also you added a donwloads box to releases without links or any autolink validaiton in the CI tests
+
+- Captured real GUI screenshots programmatically (PIL ImageGrab of the
+  actual windows): assets/screenshots/gui-login.png, gui-main.png,
+  gui-create-repository.png - committed.
+- RELEASE_NOTES.md: screenshots table (login | main + create page) +
+  Downloads table now links to per-tag release asset URLs.
+- release.yml: new validation loop - every releases/download link in the
+  body must match a built asset or the release FAILS.
+- Re-cut v1.1.0 again (run 41955120911, success): body verified to contain
+  the screenshot embeds + linked downloads; all 5 assets rebuilt.
+- Commits: 1aa5be5 (screenshots/links/validation), 6dbb9e1 (version reset).
+
 ## Status
 
-- v1.1.0 fully replaced; everything committed and pushed.
+- v1.1.0 fully replaced with GUI screenshots + linked downloads; all
+  committed and pushed.
 
 ## Commands run
 

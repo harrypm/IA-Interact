@@ -2,11 +2,16 @@
 
 A native desktop client for uploading, downloading and managing Internet Archive repositories.
 
+<!-- Screenshots are captured automatically by the release pipeline
+     (tests/capture_screenshots.py on the Windows build job) and attached
+     as release assets; the links below are validated against the built
+     assets by the release workflow. -->
+
 | Login | Main window |
 ---|---|
-![Login](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/assets/screenshots/gui-login.png) | ![Main window](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/assets/screenshots/gui-main.png) |
+![Login](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/gui-login.png) | ![Main window](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/gui-main.png) |
 
-![Create Repository page](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/assets/screenshots/gui-create-repository.png)
+![Create Repository page](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/gui-create-repository.png)
 
 ## Highlights
 

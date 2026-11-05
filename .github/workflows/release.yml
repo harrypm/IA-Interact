@@ -160,6 +160,11 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: release-assets
+      - name: Download GUI screenshots
+        uses: actions/download-artifact@v8
+        with:
+          name: gui-screenshots
+          path: release-assets/gui-screenshots
 
       - name: Show release assets
         run: find release-assets -type f -printf '%p\n' | sort
@@ -202,4 +207,5 @@ jobs:
             release-assets/**/*.AppImage
             release-assets/**/*.exe
             release-assets/**/*.app.zip
+            release-assets/gui-screenshots/*.png
           fail_on_unmatched_files: true
