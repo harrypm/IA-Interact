@@ -161,9 +161,41 @@
   windows-x86_64/arm64 + linux-aarch64 building; release auto-published
   with assets on completion.
 
+## Follow-up 6: release names, notes + screenshots, in-app update notes page
+
+> Change GH release names to "AI Interact" add proper release notes and screen shots to future releases and update the current release page, also add an update call page to pull notes in when an new update is ready for the app.
+
+- release.yml publish job: release name = "IA Interact vX.Y.Z"; body comes
+  from RELEASE_NOTES.md at the tag (@TAG@ sed-swapped so screenshots pin to
+  the release's repo tree); generated changelog still appended.
+- RELEASE_NOTES.md template created (v1.1.0 highlights + screenshot +
+  downloads table + key info).
+- v1.1.0 release page updated NOW: renamed "IA Interact v1.1.0", curated
+  notes + screenshot embed + preserved auto-generated changelog.
+- ia_update.fetch_release_notes(tag=None, proxies=None): GitHub API notes
+  fetcher; UpdateDialog grew a "What's new in <tag>" notes page - notes are
+  pulled in automatically whenever an update is detected (manual or cached
+  auto-check), read-only pane, error fallback. Headless-tested OK.
+- Note: user typed "AI Interact"; used the app's actual name "IA Interact".
+- Committed 9b53ca7 (rebased over the release bot's version bump aefaf07)
+  and pushed - remote is v1.1.0 with __version__ = "1.1.0".
+
+## Follow-up 7: reset and replace v1.1.0
+
+> reset and replace v1.1.0 with these changes
+
+- version.py reset to 1.0.2 (commit f789c92) so the cutter could re-bump.
+- Old release + tag deleted (gh release delete --cleanup-tag).
+- Re-cut via `gh workflow run release.yml -f release_tag=v1.1.0` (run
+  41954324922, success) - tag now sits at HEAD including the release-notes
+  system + in-app update notes page.
+- Published: name "IA Interact v1.1.0", curated notes + screenshot embed
+  + generated changelog, all 5 assets rebuilt.
+- The in-app update-notes page IS in this release's exe now.
+
 ## Status
 
-- Release run in progress: https://github.com/harrypm/IA-Interact/actions/runs/41952304942
+- v1.1.0 fully replaced; everything committed and pushed.
 
 ## Commands run
 

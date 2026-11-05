@@ -176,6 +176,19 @@ jobs:
             printf 'IA Interact %s\n\nSee the changelog below.\n' "${TAG}" > body.md
           fi
 
+          # Validate: every download link in the notes must point at an asset
+          # that was actually built - fail the release otherwise.
+          missing=0
+          for link in $(grep -o 'releases/download/[^)]*' body.md | sed 's|releases/download/||' | sort -u); do
+            if ! find release-assets -type f -name "$(basename "${link}")" | grep -q .; then
+              echo "ERROR: release notes link to '${link}' but no such asset was built." >&2
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Attach assets to GitHub Release
         uses: softprops/action-gh-release@v3
         with:

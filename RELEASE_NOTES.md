@@ -2,7 +2,11 @@
 
 A native desktop client for uploading, downloading and managing Internet Archive repositories.
 
-![IA Interact GUI](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/image-1.png)
+| Login | Main window |
+---|---|
+![Login](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/assets/screenshots/gui-login.png) | ![Main window](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/assets/screenshots/gui-main.png) |
+
+![Create Repository page](https://raw.githubusercontent.com/harrypm/IA-Interact/@TAG@/assets/screenshots/gui-create-repository.png)
 
 ## Highlights
 
@@ -18,13 +22,13 @@ A native desktop client for uploading, downloading and managing Internet Archive
 
 ## Downloads
 
-| Platform | File |
+| Platform | Download |
 |---|---|
-| Windows x86_64 | `ia-interact-windows-x86_64.exe` |
-| Windows ARM64 | `ia-interact-windows-arm64.exe` |
-| Linux x86_64 | `ia-interact-linux-x86_64.AppImage` |
-| Linux ARM64 | `ia-interact-linux-aarch64.AppImage` |
-| macOS (Apple Silicon + Intel) | `ia-interact-macos-universal.app.zip` |
+| Windows x86_64 | [ia-interact-windows-x86_64.exe](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/ia-interact-windows-x86_64.exe) |
+| Windows ARM64 | [ia-interact-windows-arm64.exe](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/ia-interact-windows-arm64.exe) |
+| Linux x86_64 | [ia-interact-linux-x86_64.AppImage](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/ia-interact-linux-x86_64.AppImage) |
+| Linux ARM64 | [ia-interact-linux-aarch64.AppImage](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/ia-interact-linux-aarch64.AppImage) |
+| macOS (Apple Silicon + Intel) | [ia-interact-macos-universal.app.zip](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/ia-interact-macos-universal.app.zip) |
 
 ## Notes
 
