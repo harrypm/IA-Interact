@@ -209,10 +209,45 @@
   the screenshot embeds + linked downloads; all 5 assets rebuilt.
 - Commits: 1aa5be5 (screenshots/links/validation), 6dbb9e1 (version reset).
 
+## EMERGENCY: screenshot leak + remediation
+
+> no no no nuke it now that leaked desktop and outher apps
+
+- The ImageGrab captures leaked desktop + other apps (DPI mismatch: PIL was
+  not DPI-aware while the DPI-aware Tk window reported physical pixels -
+  crop grabbed screen area outside the window).
+- IMMEDIATELY: deleted the v1.1.0 release + tag (gh release delete
+  --cleanup-tag) - leak off the public site.
+- Purged the leaked PNGs from git history: git filter-branch
+  (--index-filter git rm -r --cached assets/screenshots, range 64702c2..HEAD)
+  -> commits rewritten (4256de6, 1327324), force-pushed main, dropped
+  refs/original + reflog expire + gc --prune=now.
+- NOTE: GitHub may cache unreachable objects briefly; contact GitHub
+  support for a hard purge guarantee if wanted.
+
+## Follow-up 9: window-only capture (PrintWindow) + CI wiring
+
+> It should have grabbed the app window ONLY and directly add this to the tests and workflow
+
+- Root cause fix: replaced screen-grabbing entirely with Win32 PrintWindow
+  (PW_RENDERFULLCONTENT) - renders the window's OWN surface into a bitmap;
+  overlapping apps/desktop can NEVER appear regardless of window state.
+- tests/capture_screenshots.py rewritten around PrintWindow + local
+  GetWindowRect sizing; verified: captures 1296x759 / 1323x838 / 796x693,
+  corner pixels pure black (theme), no foreign content possible.
+- CI wiring: windows-exe-x86_64 build job runs the capture + uploads a
+  gui-screenshots artifact; release publish job attaches gui-*.png to the
+  release; RELEASE_NOTES embeds the CI-captured shots via per-tag download
+  links (covered by the link-validation loop).
+- Re-cut v1.1.0 (run 41956440629, success): name "IA Interact v1.1.0",
+  notes with CI-captured window-only screenshots + linked downloads,
+  all 5 binaries rebuilt. Commits: 5ec54eb, 6dbb9e1 chain.
+
 ## Status
 
-- v1.1.0 fully replaced with GUI screenshots + linked downloads; all
-  committed and pushed.
+- v1.1.0 final: window-only CI screenshots, linked + validated downloads,
+  in-app update notes page. Everything committed and pushed. Leaked images
+  were public ~25 min; history rewritten; GitHub support purge optional.
 
 ## Commands run
 
