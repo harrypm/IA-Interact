@@ -148,10 +148,22 @@
 - test-item mode: already present (test collection in create page + live
   test mode) - user confirmed.
 
+## Commit + release (user go-ahead)
+
+> commit push, trigger a new release
+
+- Batch committed as `efb38d1` (8 files, +2197/-144) and pushed.
+- Restore point: C:\Users\Harry\IA-Interact-restore-points\
+  2026-11-05_wide-layout-network-drafts-folder-view.zip
+- Release: gh workflow run release.yml -f bump=minor -> run 41952304942
+  (input is named `bump`, not version_bump - first dispatch 422'd).
+  Tag cut: v1.1.0 (from v1.0.2); builds: linux-x86_64 + macos done,
+  windows-x86_64/arm64 + linux-aarch64 building; release auto-published
+  with assets on completion.
+
 ## Status
 
-- All session features NOT yet committed (awaiting user visual confirmation
-  of the running exe).
+- Release run in progress: https://github.com/harrypm/IA-Interact/actions/runs/41952304942
 
 ## Commands run
 

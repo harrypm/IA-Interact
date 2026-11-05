@@ -164,10 +164,24 @@ jobs:
       - name: Show release assets
         run: find release-assets -type f -printf '%p\n' | sort
 
+      - name: Prepare release body (curated notes + screenshots)
+        env:
+          TAG: ${{ needs.cut-release.outputs.tag }}
+        run: |
+          # RELEASE_NOTES.md at the tag is the curated body; @TAG@ is swapped
+          # for the real tag so screenshots pin to this release's repo tree.
+          if [ -f RELEASE_NOTES.md ]; then
+            sed "s/@TAG@/${TAG}/g" RELEASE_NOTES.md > body.md
+          else
+            printf 'IA Interact %s\n\nSee the changelog below.\n' "${TAG}" > body.md
+          fi
+
       - name: Attach assets to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.cut-release.outputs.tag }}
+          name: "IA Interact ${{ needs.cut-release.outputs.tag }}"
+          body_path: body.md
           generate_release_notes: true
           prerelease: ${{ inputs.prerelease }}
           make_latest: ${{ inputs.make_latest && 'true' || 'false' }}

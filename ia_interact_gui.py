@@ -4330,23 +4330,24 @@ class UpdateDialog(tk.Toplevel):
         self.parent = parent
         scale = getattr(parent, "_ui_scale", 1.0)
         self.title("Check for Updates")
-        self.geometry(f"{int(460 * scale)}x{int(280 * scale)}")
-        self.minsize(int(400 * scale), int(240 * scale))
+        self.geometry(f"{int(560 * scale)}x{int(300 * scale)}")
+        self.minsize(int(460 * scale), int(260 * scale))
+        self._notes_loading = False
         self.configure(bg=IAInteractGUI.COLOR_BG)
         self.transient(parent)
 
         self._latest_tag = None
 
-        body = ttk.Frame(self, padding=16, style="TFrame")
-        body.pack(fill="both", expand=True)
+        self.body = ttk.Frame(self, padding=16, style="TFrame")
+        self.body.pack(fill="both", expand=True)
 
-        ttk.Label(body, text="Check for Updates", style="Header.TLabel").pack(anchor="w")
-        ttk.Label(body, text=f"Installed version: v{__version__}", style="Card.TLabel").pack(anchor="w", pady=(4, 8))
+        ttk.Label(self.body, text="Check for Updates", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(self.body, text=f"Installed version: v{__version__}", style="Card.TLabel").pack(anchor="w", pady=(4, 8))
 
-        self.status_label = ttk.Label(body, text="", style="Card.TLabel", wraplength=420, justify="left")
+        self.status_label = ttk.Label(self.body, text="", style="Card.TLabel", wraplength=420, justify="left")
         self.status_label.pack(anchor="w", fill="x", expand=True)
 
-        buttons = ttk.Frame(body, style="TFrame")
+        buttons = ttk.Frame(self.body, style="TFrame")
         buttons.pack(fill="x", pady=(12, 0))
         self.check_button = ttk.Button(buttons, text="Check Now", command=self._check_now, style="Accent.TButton")
         self.check_button.pack(side="left")
@@ -4389,6 +4390,7 @@ class UpdateDialog(tk.Toplevel):
         if cmp < 0:
             self.status_label.configure(text=f"Update available: {tag}\n(installed v{__version__}).")
             self.download_button.configure(state="normal")
+            self._load_release_notes(tag)  # pull the release notes in
         elif cmp == 0:
             self.status_label.configure(text=f"You are up to date (latest {tag}).")
             self.download_button.configure(state="disabled")
@@ -4405,6 +4407,58 @@ class UpdateDialog(tk.Toplevel):
         self.status_label.configure(text="Checking for updates...")
         parent._run_update_check(manual=True, on_result=self._apply_result)
 
+    def _load_release_notes(self, tag):
+        """Pull the new release's notes from GitHub and show them in-page."""
+        parent = self.parent
+        if ia_update is None or not isinstance(parent, IAInteractGUI) or self._notes_loading:
+            return
+        self._notes_loading = True
+        proxies = parent._proxies() if hasattr(parent, "_proxies") else None
+
+        def worker():
+            info, error = ia_update.fetch_release_notes(tag, proxies=proxies)
+            try:
+                self.after(0, lambda: self._show_release_notes(info, error))
+            except RuntimeError:
+                pass  # dialog/app closed while fetching
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_release_notes(self, info, error):
+        self._notes_loading = False
+        if not self.winfo_exists():
+            return
+        if error:
+            note = f"(Release notes could not be loaded: {error})"
+        else:
+            note = (info or {}).get("body") or "(No release notes were published for this release.)"
+        if getattr(self, "notes_text", None) is None:
+            self.notes_header = ttk.Label(self.body, text="", style="Header.TLabel")
+            self.notes_header.pack(anchor="w", pady=(12, 4))
+            notes_frame = ttk.Frame(self.body, style="TFrame")
+            notes_frame.pack(fill="both", expand=True)
+            notes_frame.columnconfigure(0, weight=1)
+            notes_frame.rowconfigure(0, weight=1)
+            self.notes_text = tk.Text(
+                notes_frame, height=12, wrap="word", padx=8, pady=6,
+                bg=IAInteractGUI.COLOR_ENTRY, fg=IAInteractGUI.COLOR_TEXT,
+                insertbackground=IAInteractGUI.COLOR_TEXT, relief="flat",
+                highlightthickness=1, highlightbackground=IAInteractGUI.COLOR_BORDER,
+            )
+            self.notes_text.grid(row=0, column=0, sticky="nsew")
+            notes_scroll = ttk.Scrollbar(notes_frame, orient="vertical", command=self.notes_text.yview)
+            self.notes_text.configure(yscrollcommand=notes_scroll.set)
+            notes_scroll.grid(row=0, column=1, sticky="ns")
+            self.geometry(f"{int(560 * self._ui_scale_dialog())}x{int(620 * self._ui_scale_dialog())}")
+        self.notes_header.configure(text=f"What's new in {(info or {}).get('tag', '')}")
+        self.notes_text.configure(state="normal")
+        self.notes_text.delete("1.0", "end")
+        self.notes_text.insert("1.0", note)
+        self.notes_text.configure(state="disabled")
+
+    def _ui_scale_dialog(self):
+        return getattr(self.parent, "_ui_scale", 1.0) if isinstance(self.parent, IAInteractGUI) else 1.0
+
     def _apply_result(self, result):
         self.check_button.configure(state="normal")
         if not result.get("ok"):
@@ -4416,6 +4470,7 @@ class UpdateDialog(tk.Toplevel):
         if result.get("available"):
             self.status_label.configure(text=f"Update available: {tag}\n(installed v{__version__}).")
             self.download_button.configure(state="normal")
+            self._load_release_notes(tag)
         elif result.get("cmp") == 0:
             self.status_label.configure(text=f"You are up to date (latest {tag}).")
             self.download_button.configure(state="disabled")

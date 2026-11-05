@@ -154,6 +154,45 @@ def build_release_asset_url(release_tag):
     return f"{RELEASES_DOWNLOAD_BASE_URL}/{release_tag}/{filename}"
 
 
+def fetch_release_notes(release_tag=None, proxies=None):
+    """Fetch a release's display name + notes body from the GitHub API.
+
+    Pass a ``release_tag`` to pin a specific release, or None for the latest.
+    Returns ({"name", "tag", "body"}, None) or (None, error-string). Used by
+    the GUI's update dialog to pull the release notes in when an update is
+    ready. Unauthenticated API use is fine at the checker's low frequency.
+    """
+    if requests is None:
+        return None, "requests unavailable"
+    if release_tag and is_release_tag_safe(release_tag):
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tags/{release_tag}"
+    else:
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+    try:
+        response = requests.get(
+            url,
+            timeout=FETCH_TIMEOUT,
+            headers={"User-Agent": "ia-interact-update-check"},
+            proxies=proxies,
+        )
+    except requests.RequestException as exc:
+        return None, f"network request failed: {exc}"
+    if response.status_code != 200:
+        return None, f"GitHub API returned {response.status_code} {response.reason}"
+    try:
+        data = response.json()
+    except ValueError:
+        return None, "GitHub API response was not valid JSON"
+    body = data.get("body") or ""
+    return (
+        {
+            "name": data.get("name") or data.get("tag_name") or "",
+            "tag": data.get("tag_name") or release_tag or "",
+            "body": body,
+        },
+        None,
+    )
+
 def fetch_latest_release_tag():
     """Follow the releases/latest redirect and return (tag, None) or (None, error).
 
