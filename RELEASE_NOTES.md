@@ -13,6 +13,15 @@ A native desktop client for uploading, downloading and managing Internet Archive
 
 ![Create Repository page](https://github.com/harrypm/IA-Interact/releases/download/@TAG@/gui-create-repository.png)
 
+## New in @TAG@
+
+- **Window menu** (top bar) with user choices: **Remember window size/position** (opt-in; restores your last size/position on open), **Auto-expand folders when added**, and **Log uploads to .txt** (per-file upload record at `~/IA-Interact/uploads-log.txt`).
+- **Create Repository metadata fix** — the previous version's metadata write silently hit the website HTML page and wrote nothing (items showed the identifier as the title). Metadata now writes through the real JSON-Patch API and is verified to land: title, description, subject tags, collection, license, and custom fields.
+- **Empty folders** show in folder view as `(0 files)` rows (uploads nothing — archive.org stores files only).
+- **Clickable +/−** tree markers (single-click expand/collapse; double-click the row still works).
+- **Expand all / Collapse all** buttons on both file viewers.
+- **Progress panel** no longer squeezes the neighbouring panels during transfers.
+
 ## Highlights
 
 - **Create Repository page** — full item-creation form (title, identifier with availability check + slug auto-suggest, description, subject tags, collection, creator/date/language/license, custom key:value metadata), modeled on ia-gui's editor.
