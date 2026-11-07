@@ -49,6 +49,16 @@ except Exception:
     ia_drafts = None
 
 try:
+    import ia_metadata
+except Exception:
+    ia_metadata = None
+
+try:
+    import ia_settings
+except Exception:
+    ia_settings = None
+
+try:
     from version import __version__
 except Exception:
     __version__ = "unknown"
@@ -365,6 +375,8 @@ def scrape_search_items(query, proxies=None):
 
 def build_file_tree_rows(file_paths):
     """Build directory-style rows from flat 'a/b/c' file paths.
+    Paths ending with '/' are folder markers: they emit a folder row even
+    when they contain no files (empty folders, issue #10).
 
     Returns a list of row dicts:
       files:   {"type": "file", "label", "depth", "file_index", "path"}
@@ -381,7 +393,11 @@ def build_file_tree_rows(file_paths):
         node = root
         for part in parts[:-1]:
             node = node["dirs"].setdefault(part, {"dirs": {}, "files": []})
-        node["files"].append((index, path))
+        if path.endswith("/"):
+            # empty-folder marker: a childless folder row (0 files)
+            node["dirs"].setdefault(parts[-1], {"dirs": {}, "files": []})
+        else:
+            node["files"].append((index, path))
 
     def build(node, depth, prefix):
         rows = []
@@ -655,6 +671,17 @@ class IAInteractGUI(tk.Tk):
                 pass
         self._network_active_var = tk.StringVar(value="")
 
+        # User choices (Window menu) - persisted in settings.json.
+        self.settings_store = ia_settings.SettingsStore() if ia_settings is not None else None
+        if self.settings_store is not None:
+            try:
+                self.settings_store.load()
+            except Exception:
+                pass
+        self.remember_window_var = tk.BooleanVar(value=bool(self.settings_store.get("remember_window"))) if self.settings_store else tk.BooleanVar(value=False)
+        self.auto_expand_var = tk.BooleanVar(value=bool(self.settings_store.get("auto_expand_folders"))) if self.settings_store else tk.BooleanVar(value=False)
+        self.log_txt_var = tk.BooleanVar(value=bool(self.settings_store.get("log_uploads_txt"))) if self.settings_store else tk.BooleanVar(value=False)
+
         self.cancel_event = threading.Event()
 
         # IA status indicator + offline action queue (see _ia_* methods).
@@ -684,7 +711,8 @@ class IAInteractGUI(tk.Tk):
 
         self._build_menu()
         self._build_login_screen()
-        self._center_on_screen()
+        self._restore_or_center()
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
     def _set_window_icon(self):
         """Show the Internet Archive logo in the title bar and taskbar.
@@ -1167,6 +1195,7 @@ class IAInteractGUI(tk.Tk):
         self._apply_dark_text_widget_theme(self.remote_listbox)
         self.remote_listbox.bind("<<ListboxSelect>>", self._on_remote_select)
         self.remote_listbox.bind("<Double-Button-1>", self._toggle_remote_folder)
+        self.remote_listbox.bind("<Button-1>", self._on_viewer_click)
         self.remote_listbox.bind("<Button-3>", self._show_remote_context_menu)
         remote_scroll = ttk.Scrollbar(remote_frame, orient="vertical", command=self.remote_listbox.yview)
         remote_scroll_x = ttk.Scrollbar(remote_frame, orient="horizontal", command=self.remote_listbox.xview)
@@ -1178,11 +1207,13 @@ class IAInteractGUI(tk.Tk):
         remote_options.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(
             remote_options,
-            text="Folder view (double-click folder to collapse)",
+            text="Folder view",
             variable=self.remote_tree_mode_var,
             command=self._render_remote_rows,
             style="Card.TCheckbutton",
         ).pack(side="left")
+        ttk.Button(remote_options, text="Expand all", width=10, command=self._remote_expand_all).pack(side="left", padx=(10, 0))
+        ttk.Button(remote_options, text="Collapse all", width=10, command=self._remote_collapse_all).pack(side="left", padx=(6, 0))
 
         local_frame = ttk.LabelFrame(list_container, text="Local Files (select for upload)", padding=8, style="Card.TLabelframe")
         local_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
@@ -1200,6 +1231,7 @@ class IAInteractGUI(tk.Tk):
         self._apply_dark_text_widget_theme(self.local_listbox)
         self.local_listbox.bind("<<ListboxSelect>>", self._on_local_select)
         self.local_listbox.bind("<Double-Button-1>", self._toggle_local_folder)
+        self.local_listbox.bind("<Button-1>", self._on_viewer_click)
         local_scroll = ttk.Scrollbar(local_frame, orient="vertical", command=self.local_listbox.yview)
         local_scroll_x = ttk.Scrollbar(local_frame, orient="horizontal", command=self.local_listbox.xview)
         self.local_listbox.configure(yscrollcommand=local_scroll.set, xscrollcommand=local_scroll_x.set)
@@ -1225,11 +1257,13 @@ class IAInteractGUI(tk.Tk):
         ).pack(side="left")
         ttk.Checkbutton(
             local_options,
-            text="Folder view (double-click folder to collapse)",
+            text="Folder view",
             variable=self.local_tree_mode_var,
             command=self._refresh_local_files,
             style="Card.TCheckbutton",
         ).pack(side="left", padx=(16, 0))
+        ttk.Button(local_options, text="Expand all", width=10, command=self._local_expand_all).pack(side="left", padx=(10, 0))
+        ttk.Button(local_options, text="Collapse all", width=10, command=self._local_collapse_all).pack(side="left", padx=(6, 0))
 
         self.dnd_hint_label = ttk.Label(local_frame, text="", style="MutedCard.TLabel")
         self.dnd_hint_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -1283,7 +1317,12 @@ class IAInteractGUI(tk.Tk):
             progress_frame, from_=0, to=10, textvariable=self.retry_var, width=3
         )
         retries_spin.grid(row=0, column=3, sticky="e")
-        self.progress_label = ttk.Label(progress_frame, text="Idle", style="Card.TLabel")
+        # wraplength keeps long progress lines from widening the grid column
+        # and squeezing the neighbouring panels during transfers (issue #11).
+        self.progress_label = ttk.Label(
+            progress_frame, text="Idle", style="Card.TLabel",
+            wraplength=int(300 * self._ui_scale), justify="left",
+        )
         self.progress_label.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         status_frame = ttk.LabelFrame(info_container, text="Status", padding=8, style="Card.TLabelframe")
@@ -1364,6 +1403,25 @@ class IAInteractGUI(tk.Tk):
         menubar.add_cascade(label="Drafts", menu=drafts_menu)
         self.drafts_menu = drafts_menu
 
+        window_menu = self._make_dark_menu(menubar)
+        window_menu.add_checkbutton(
+            label="Remember window size/position",
+            variable=self.remember_window_var,
+            command=self._on_remember_window_toggled,
+        )
+        window_menu.add_checkbutton(
+            label="Auto-expand folders when added",
+            variable=self.auto_expand_var,
+            command=self._on_auto_expand_toggled,
+        )
+        window_menu.add_checkbutton(
+            label="Log uploads to .txt",
+            variable=self.log_txt_var,
+            command=self._on_log_txt_toggled,
+        )
+        menubar.add_cascade(label="Window", menu=window_menu)
+        self.window_menu = window_menu
+
         help_menu = self._make_dark_menu(menubar)
         help_menu.add_command(label="Check for Updates...", command=self._open_update_dialog)
         help_menu.add_separator()
@@ -1372,6 +1430,73 @@ class IAInteractGUI(tk.Tk):
         self.configure(menu=menubar)
         self._rebuild_network_menu()
         self._rebuild_drafts_menu()
+
+    def _on_window_close(self):
+        self._save_window_geometry()
+        self.destroy()
+
+    # ---------------- Window menu user choices ----------------
+
+    def _persist_setting(self, key, value):
+        if self.settings_store is not None:
+            try:
+                self.settings_store.set(key, value)
+            except Exception:
+                pass
+
+    def _on_remember_window_toggled(self):
+        self._persist_setting("remember_window", self.remember_window_var.get())
+        if self.remember_window_var.get():
+            # remember the CURRENT geometry right away
+            self._persist_setting("window_geometry", self.geometry())
+
+    def _on_auto_expand_toggled(self):
+        self._persist_setting("auto_expand_folders", self.auto_expand_var.get())
+
+    def _on_log_txt_toggled(self):
+        self._persist_setting("log_uploads_txt", self.log_txt_var.get())
+
+    def _restore_or_center(self):
+        """Restore the remembered size/position (clamped to screen) when the
+        user opted in; otherwise center on the primary monitor."""
+        if self.remember_window_var.get() and self.settings_store is not None:
+            geometry = self.settings_store.get("window_geometry") or ""
+            match = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", geometry)
+            if match:
+                try:
+                    self.update_idletasks()
+                    w, h, x, y = (int(g) for g in match.groups())
+                    screen_w = self.winfo_screenwidth()
+                    screen_h = self.winfo_screenheight()
+                    # keep it reachable: clamp inside the visible screen
+                    x = min(max(x, -w + 120), max(0, screen_w - 120))
+                    y = min(max(y, 0), max(0, screen_h - 120))
+                    self.geometry(f"{w}x{h}+{x}+{y}")
+                    return
+                except tk.TclError:
+                    pass
+        self._center_on_screen()
+
+    def _save_window_geometry(self):
+        if self.remember_window_var.get() and self.settings_store is not None:
+            self._persist_setting("window_geometry", self.geometry())
+
+    def _write_upload_log(self, lines):
+        """Append a completed transfer's file log to ~/IA-Interact/uploads-log.txt
+        (issue #8). Called from worker threads; ``lines`` are pre-formatted."""
+        if not lines:
+            return
+        try:
+            log_dir = os.path.join(os.path.expanduser("~"), "IA-Interact")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "uploads-log.txt")
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+            self.after(0, lambda: self.append_status(
+                f"Upload log written: {log_path} ({len(lines)} line(s))."
+            ))
+        except OSError as exc:
+            self.after(0, lambda: self.append_status(f"Could not write the upload log: {exc}"))
 
     def _rebuild_network_menu(self):
         """Refresh the Network menu's quick profile entries (radiobuttons)."""
@@ -1917,6 +2042,14 @@ class IAInteractGUI(tk.Tk):
         self._ia_check_scheduled = True
         self.after(interval, fire)
 
+    def _expand_entries_folders(self):
+        """Auto-expand (issue #12): reveal every folder path the current
+        Local Files list contains, including each folder's own root name."""
+        for entry in self.local_files:
+            parts = [p for p in self._entry_remote_rel(entry).split("/") if p]
+            for depth in range(1, len(parts)):
+                self._local_expanded.add("/".join(parts[:depth]) + "/")
+
     def _set_ia_indicator(self, checking=False, alive=None, detail=""):
         if self.ia_status_label is None:
             return
@@ -2015,7 +2148,7 @@ class IAInteractGUI(tk.Tk):
     def _open_create_repository_dialog(self):
         CreateRepositoryDialog(self)
 
-    def _start_upload(self, identifier, files_to_upload, target_directory, queue_derive=False, skip_existing=True):
+    def _start_upload(self, identifier, files_to_upload, target_directory, queue_derive=False, skip_existing=True, log_uploads=False):
         self.append_status(
             f"Starting upload of {len(files_to_upload)} file(s) to '{identifier}' "
             f"directory '{target_directory or '(root)'}'."
@@ -2027,6 +2160,7 @@ class IAInteractGUI(tk.Tk):
             if skip_existing:
                 remote_info = fetch_item_file_info(identifier, proxies=self._proxies()) or {}
             skipped_count = 0
+            log_lines = []
             reporter = _ProgressReporter(self, len(files_to_upload), "upload")
             success_count = 0
             for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
@@ -2036,6 +2170,7 @@ class IAInteractGUI(tk.Tk):
                 full_remote_path = f"{target_directory}/{remote_rel}" if target_directory else remote_rel
                 if skip_existing and is_duplicate_upload(file_path, remote_info.get(full_remote_path)):
                     skipped_count += 1
+                    log_lines.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {identifier} | {full_remote_path} | skipped (identical)")
                     self.append_status(f"Skipped (already on item, identical): {full_remote_path}")
                     continue
                 ok, detail = self.upload_single_file(
@@ -2046,6 +2181,7 @@ class IAInteractGUI(tk.Tk):
                 reporter.finish_file()
                 if ok:
                     success_count += 1
+                log_lines.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {identifier} | {full_remote_path} | {'uploaded' if ok else 'FAILED'}")
             cancelled = self.cancel_event.is_set()
             self._set_transfer_running(False)
             if not cancelled:
@@ -2053,6 +2189,8 @@ class IAInteractGUI(tk.Tk):
                 if skipped_count:
                     summary += f", {skipped_count} skipped (already on item)"
                 self.append_status(summary + ".")
+            if log_uploads:
+                self._write_upload_log(log_lines)
             reporter.idle("Cancelled" if cancelled else "Idle")
 
         self.cancel_event.clear()
@@ -2084,7 +2222,7 @@ class IAInteractGUI(tk.Tk):
         self._set_transfer_running(True)
         threading.Thread(target=worker, daemon=True).start()
 
-    def _start_create_repository(self, identifier, metadata, files_to_upload, queue_derive=True, skip_existing=True):
+    def _start_create_repository(self, identifier, metadata, files_to_upload, queue_derive=True, skip_existing=True, log_uploads=False):
         """Create a new item: upload the files (auto-makes the bucket), then
         POST the item metadata - the same flow as the CLI's create option.
 
@@ -2118,12 +2256,14 @@ class IAInteractGUI(tk.Tk):
             skipped_count = 0
             reporter = _ProgressReporter(self, len(files_to_upload), "create")
             success_count = 0
+            log_lines = []
             for index, (file_path, remote_rel) in enumerate(files_to_upload, start=1):
                 if self.cancel_event.is_set():
                     self.append_status("Repository creation cancelled by user.")
                     break
                 if skip_existing and is_duplicate_upload(file_path, remote_info.get(remote_rel)):
                     skipped_count += 1
+                    log_lines.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {identifier} | {remote_rel} | skipped (identical)")
                     self.append_status(f"Skipped (already on item, identical): {remote_rel}")
                     success_count += 1  # counts toward the item being complete
                     continue
@@ -2135,6 +2275,7 @@ class IAInteractGUI(tk.Tk):
                 reporter.finish_file()
                 if ok:
                     success_count += 1
+                log_lines.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {identifier} | {remote_rel} | {'uploaded' if ok else 'FAILED'}")
             cancelled = self.cancel_event.is_set()
             if cancelled:
                 self._set_transfer_running(False)
@@ -2148,30 +2289,24 @@ class IAInteractGUI(tk.Tk):
                 reporter.idle("Idle")
                 return
             self.append_status("All files uploaded - submitting item metadata...")
-            try:
-                response = requests.post(
-                    f"https://archive.org/metadata/{identifier}/metadata",
-                    data=metadata,
-                    timeout=(30, 120),
-                    proxies=self._proxies(),
-                )
-            except requests.RequestException as exc:
-                self._set_transfer_running(False)
-                self.append_status(f"Metadata submission failed for '{identifier}': {exc}")
-                reporter.idle("Idle")
-                return
-            if response.status_code == 200:
+            # JSON-Patch write API (the old form POST wrote nothing - issue #9).
+            ok, detail = ia_metadata.write_item_metadata(
+                identifier, metadata, self.access_key, self.secret_key,
+                proxies=self._proxies(),
+            )
+            if ok:
                 self.append_status(
                     f"Repository '{identifier}' created with {success_count} file(s) and metadata."
                 )
             else:
                 self.append_status(
-                    f"Files uploaded but metadata submission failed for '{identifier}': "
-                    f"{response.status_code} {response.reason}"
+                    f"Files uploaded but metadata was not saved for '{identifier}': {detail}"
                 )
             self._set_transfer_running(False)
             self.after(0, self.load_repository_files)
             reporter.idle("Idle")
+            if log_uploads:
+                self._write_upload_log(log_lines)
 
         self.cancel_event.clear()
         self._set_transfer_running(True)
@@ -2548,7 +2683,9 @@ class IAInteractGUI(tk.Tk):
             self._render_local_tree()
             return
         for entry in self.local_files:
-            if entry.get("folder_root"):
+            if entry.get("empty_folder"):
+                display = f"{self._entry_remote_rel(entry)}/  [empty folder - uploads nothing]"
+            elif entry.get("folder_root"):
                 display = f"{self._entry_remote_rel(entry)}    [{entry['local_path']}]"
             else:
                 display = entry["local_path"]
@@ -2560,8 +2697,10 @@ class IAInteractGUI(tk.Tk):
         Grouped by repository-side path (target dir + folder-root name +
         subfolders), mirroring what the upload will look like on archive.org.
         """
+        # empty-folder entries end with '/' so they build as folder rows
         self.local_tree_rows = build_file_tree_rows(
-            [self._entry_remote_rel(entry) for entry in self.local_files]
+            [self._entry_remote_rel(entry) + ("/" if entry.get("empty_folder") else "")
+             for entry in self.local_files]
         )
 
         def apply_collapsed(rows):
@@ -2594,6 +2733,64 @@ class IAInteractGUI(tk.Tk):
                 self.local_listbox.insert(
                     "end", f"{indent}{os.path.basename(entry['local_path'])}"
                 )
+
+    def _on_viewer_click(self, event):
+        """Single-click on a +/- marker toggles the folder (issue #14).
+        Returns 'break' to suppress the select when we toggle."""
+        if event.widget is self.remote_listbox:
+            rows, expanded = self.remote_visible_rows, self._remote_expanded
+            tree_on = self.remote_tree_mode_var.get()
+        else:
+            rows, expanded = self.local_visible_rows, self._local_expanded
+            tree_on = self.local_tree_mode_var.get()
+        if not tree_on:
+            return None
+        row_index = event.widget.nearest(event.y)
+        if not (0 <= row_index < len(rows)):
+            return None
+        row = rows[row_index]
+        if row["type"] != "folder":
+            return None
+        import tkinter.font as tkfont
+        char_width = tkfont.Font(font=event.widget["font"]).measure("0")
+        if event.x <= (row["depth"] * 4 + 2) * char_width:
+            path = row["path"]
+            if path in expanded:
+                expanded.discard(path)
+            else:
+                expanded.add(path)
+            if event.widget is self.remote_listbox:
+                self._render_remote_rows()
+            else:
+                self._refresh_local_files()
+            return "break"
+        return None
+
+    def _local_expand_all(self):
+        def collect(rows):
+            for row in rows:
+                if row["type"] == "folder":
+                    self._local_expanded.add(row["path"])
+                    collect(row["children"])
+        collect(self.local_tree_rows)
+        self._refresh_local_files()
+
+    def _local_collapse_all(self):
+        self._local_expanded.clear()
+        self._refresh_local_files()
+
+    def _remote_expand_all(self):
+        def collect(rows):
+            for row in rows:
+                if row["type"] == "folder":
+                    self._remote_expanded.add(row["path"])
+                    collect(row["children"])
+        collect(self.remote_tree_rows)
+        self._render_remote_rows()
+
+    def _remote_collapse_all(self):
+        self._remote_expanded.clear()
+        self._render_remote_rows()
 
     def _on_local_select(self, event=None):
         """Selecting a folder row also selects every file it contains."""
@@ -2673,13 +2870,31 @@ class IAInteractGUI(tk.Tk):
         return added
 
     def _add_folder_entries(self, folder_path, existing):
-        """Recursively append every file under folder_path; returns how many were added."""
+        """Recursively append every file under folder_path; returns how many
+        were added. Leaf folders with no files are added too (issue #10) -
+        they show in folder view but upload nothing."""
         folder_path = os.path.abspath(folder_path)
         entries, errors = enumerate_folder_files(folder_path)
-        if not entries and not errors:
+        root_name = os.path.basename(os.path.normpath(folder_path))
+        # issue #10: collect empty leaf dirs (no files, no subdirs) - they
+        # are shown in folder view; archive.org itself stores files only.
+        empty_entries = []
+        for dir_path, dir_names, file_names in os.walk(folder_path):
+            if not dir_names and not file_names:
+                rel_dir = os.path.relpath(dir_path, folder_path).replace(os.sep, "/")
+                if rel_dir == ".":
+                    rel_dir = ""  # the added folder itself is the empty leaf
+                empty_entries.append(
+                    {
+                        "local_path": os.path.abspath(dir_path),
+                        "rel": rel_dir,
+                        "folder_root": root_name or None,
+                        "empty_folder": True,
+                    }
+                )
+        if not entries and not errors and not empty_entries:
             self.append_status(f"No files found in folder: {folder_path}")
             return 0
-        root_name = os.path.basename(os.path.normpath(folder_path))
         added = 0
         for entry in entries:
             if entry["local_path"] in existing:
@@ -2688,12 +2903,20 @@ class IAInteractGUI(tk.Tk):
             entry["folder_root"] = root_name or None
             self.local_files.append(entry)
             added += 1
+        for entry in empty_entries:
+            if entry["local_path"] in existing:
+                continue
+            existing.add(entry["local_path"])
+            self.local_files.append(entry)
+            added += 1
         if errors:
             first_path, first_message = errors[0]
             self.append_status(
                 f"Warning: {len(errors)} subfolder(s) under '{folder_path}' could not be read "
                 f"(first: {first_path}: {first_message})."
             )
+        if self.auto_expand_var.get():
+            self._expand_entries_folders()
         return added
 
     def _warn_duplicate_targets(self):
@@ -2758,7 +2981,14 @@ class IAInteractGUI(tk.Tk):
                     continue
                 row = self.local_visible_rows[row_index]
                 if row["type"] == "folder":
-                    entry_indices.update(row["file_indices"])
+                    if row["file_indices"]:
+                        entry_indices.update(row["file_indices"])
+                    else:
+                        # an empty-folder row maps to its synthetic entry
+                        rel_target = row["path"].rstrip("/")
+                        for entry_index, entry in enumerate(self.local_files):
+                            if entry.get("empty_folder") and self._entry_remote_rel(entry).rstrip("/") == rel_target:
+                                entry_indices.add(entry_index)
                 else:
                     entry_indices.add(row["file_index"])
             for index in sorted(entry_indices, reverse=True):
@@ -2922,11 +3152,18 @@ class IAInteractGUI(tk.Tk):
 
         target_directory = self.target_directory_var.get().strip().strip("/")
         # Resolve remote paths on the Tk thread before the worker starts so
-        # the upload thread never reads Tk variables.
+        # the upload thread never reads Tk variables. Empty folders are noted
+        # but not queued (issue #10: archive.org stores files only).
         files_to_upload = [
             (entry["local_path"], self._entry_remote_rel(entry))
-            for entry in self.local_files
+            for entry in self.local_files if not entry.get("empty_folder")
         ]
+        empty_count = sum(1 for entry in self.local_files if entry.get("empty_folder"))
+        if empty_count:
+            self.append_status(
+                f"Note: {empty_count} empty folder(s) shown in the list upload nothing "
+                "(archive.org stores files, not directories)."
+            )
 
         self._submit_ia_action(
             "upload",
@@ -2935,6 +3172,7 @@ class IAInteractGUI(tk.Tk):
                 identifier, files_to_upload, target_directory,
                 queue_derive=self.upload_derive_var.get(),
                 skip_existing=self.skip_existing_var.get(),
+                log_uploads=self.log_txt_var.get(),
             ),
         )
 
@@ -3797,10 +4035,11 @@ class CreateRepositoryDialog(tk.Toplevel):
             pass
 
         # Resolve remote paths on the Tk thread before queueing so the
-        # creation thread never reads Tk variables.
+        # creation thread never reads Tk variables. Empty folders upload
+        # nothing (issue #10).
         files_to_upload = [
             (entry["local_path"], parent._entry_remote_rel(entry))
-            for entry in parent.local_files
+            for entry in parent.local_files if not entry.get("empty_folder")
         ]
 
         started = parent._submit_ia_action(
@@ -3808,7 +4047,7 @@ class CreateRepositoryDialog(tk.Toplevel):
             f"create '{identifier}' with {len(files_to_upload)} file(s)",
             lambda: parent._start_create_repository(
                 identifier, metadata, files_to_upload, queue_derive=self.derive_var.get(),
-                skip_existing=parent.skip_existing_var.get(),
+                skip_existing=parent.skip_existing_var.get(), log_uploads=parent.log_txt_var.get(),
             ),
         )
         self.result = identifier

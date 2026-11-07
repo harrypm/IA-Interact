@@ -588,14 +588,15 @@ def initialize_repository(folder_path, identifier, metadata, mode):
             except Exception as e:
                 print("Error during upload:", e)
 
-    metadata_url = f"https://archive.org/metadata/{identifier}/metadata"
+    # Write metadata via the real JSON-Patch write API (the old POST to
+    # /metadata/<id>/metadata hit the website HTML page and wrote nothing).
     try:
+        import ia_metadata
         print("\nAdding metadata to the repository...")
-        response = requests.post(metadata_url, data=metadata)
-        if response.status_code == 200:
-            print("Metadata added successfully.")
-        else:
-            print(f"Error adding metadata: {response.status_code} {response.reason}")
+        ok, detail = ia_metadata.write_item_metadata(
+            identifier, metadata, access_key, secret_key
+        )
+        print(detail if ok else detail)
     except Exception as e:
         print("Error during metadata addition:", e)
 

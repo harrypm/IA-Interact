@@ -243,10 +243,30 @@
   notes with CI-captured window-only screenshots + linked downloads,
   all 5 binaries rebuilt. Commits: 5ec54eb, 6dbb9e1 chain.
 
+## Round 2 (2026-11-07): issues #8-#15
+
+> look at the repo issues and lets begin the work excluding the one I commented on I want a menue option to make this users choice / In top tab style i.g under Window
+
+- #13 (commented, excluded from direct fix): now a user choice - new top
+  **Window** menu tab: "Remember window size/position" (persisted settings,
+  restore clamped to screen on open; off = centered default).
+- Window menu also hosts: "Auto-expand folders when added" (#12) and
+  "Log uploads to .txt" (#8 -> ~/IA-Interact/uploads-log.txt).
+- #9 ROOT CAUSE (hard data): the metadata POST hit the website HTML page
+  (200, wrote nothing). Verified fix on live test_collection: POST to
+  /metadata/<id> with -patch JSON-Patch ops + -target metadata +
+  Authorization LOW. New ia_metadata.py (write_item_metadata) used by BOTH
+  CLI create + GUI create. Sandbox test items cleaned up (204 deletes).
+- #10: empty leaf folders now appear in folder view ((0 files), root-empty
+  case handled) and are excluded from uploads with a note.
+- #11: progress label wraplength - no more panel squeeze mid-transfer.
+- #14: +/- markers are single-click togglable (click region = marker chars).
+- #15: Expand all / Collapse all buttons on both viewers.
+- All headless tests pass. exe rebuilt + relaunched.
+
 ## Status
 
-- v1.1.0 final: window-only CI screenshots, linked + validated downloads,
-  in-app update notes page. Everything committed and pushed. Leaked images
+- Round 2 committed? PENDING - commit+push+release after user verification.
   were public ~25 min; history rewritten; GitHub support purge optional.
 
 ## Commands run
