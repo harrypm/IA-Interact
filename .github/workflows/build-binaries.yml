@@ -50,7 +50,7 @@ jobs:
             artifact_path: release/ia-interact-windows-arm64.exe
           - target: macos-app-universal
             platform: macos
-            os: macos-14
+            os: macos-15
             artifact_name: ia-interact-macos-universal-app
             artifact_path: release/ia-interact-macos-universal.app.zip
     steps:
