@@ -20,7 +20,8 @@ DEFAULTS = {
     "remember_window": False,       # issue #13: opt-in, never forced
     "window_geometry": "",          # last geometry string (when remember on)
     "auto_expand_folders": False,   # issue #12
-    "log_uploads_txt": False,       # issue #8
+    "log_uploads_txt": True,        # issue #8: ALWAYS on by default; the
+    "log_directory": "",            # override for the Documents subfolder
 }
 
 

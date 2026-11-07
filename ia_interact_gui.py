@@ -680,7 +680,7 @@ class IAInteractGUI(tk.Tk):
                 pass
         self.remember_window_var = tk.BooleanVar(value=bool(self.settings_store.get("remember_window"))) if self.settings_store else tk.BooleanVar(value=False)
         self.auto_expand_var = tk.BooleanVar(value=bool(self.settings_store.get("auto_expand_folders"))) if self.settings_store else tk.BooleanVar(value=False)
-        self.log_txt_var = tk.BooleanVar(value=bool(self.settings_store.get("log_uploads_txt"))) if self.settings_store else tk.BooleanVar(value=False)
+        self.log_txt_var = tk.BooleanVar(value=bool(self.settings_store.get("log_uploads_txt"))) if self.settings_store else tk.BooleanVar(value=True)
 
         self.cancel_event = threading.Event()
 
@@ -1482,12 +1482,14 @@ class IAInteractGUI(tk.Tk):
             self._persist_setting("window_geometry", self.geometry())
 
     def _write_upload_log(self, lines):
-        """Append a completed transfer's file log to ~/IA-Interact/uploads-log.txt
-        (issue #8). Called from worker threads; ``lines`` are pre-formatted."""
+        """Append a completed transfer's file log to the Documents folder
+        (issue #8: always on by default, only disabled if toggled off).
+        Called from worker threads; ``lines`` are pre-formatted."""
         if not lines:
             return
         try:
-            log_dir = os.path.join(os.path.expanduser("~"), "IA-Interact")
+            documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
+            log_dir = os.path.join(documents_dir, "IA-Interact")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "uploads-log.txt")
             with open(log_path, "a", encoding="utf-8") as handle:
