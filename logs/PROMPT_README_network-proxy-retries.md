@@ -278,6 +278,30 @@
 - All fixes are on main; they ship in the next release cut.
   were public ~25 min; history rewritten; GitHub support purge optional.
 
+## Release v1.2.0 (user go-ahead)
+
+> Make the auto expand stuff a persistant dtoggle... then make a final reply close issue and trigger a new build
+> Logging should be an always one feature spitting them out to documents only disabled if toggled off
+
+- Auto-expand persistence verified (settings.json round-trip).
+- Log-uploads .txt: ALWAYS ON by default, writing to ~/Documents/IA-Interact/
+  uploads-log.txt (commit ebd19e1).
+- #13 final reply posted + closed (user closed it themselves first; comment
+  posted after: Window menu opt-in explanation).
+- Release cut needed several retries: the macOS job was REAPED on the
+  macos-14 fleet mid-build (run-level cancel cascade) - fixed by moving to
+  macos-15 (commit 4161846) + repeated version resets because every cut
+  pushes its own bump commit (the cutter fails if version.py already
+  equals the target version - the recurring footgun).
+- RELEASE_NOTES.md updated for v1.2.0 (New in @TAG@ + highlights).
+- FINAL: run 42349626139 success -> "IA Interact v1.2.0" published with
+  window-only CI screenshots + all 5 binaries.
+
+## Status
+
+- v1.2.0 released: https://github.com/harrypm/IA-Interact/releases/tag/v1.2.0
+- All repo issues closed (#1-#15).
+
 ## Commands run
 
 | # | Command | Result |
