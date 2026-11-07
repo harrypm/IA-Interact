@@ -266,7 +266,16 @@
 
 ## Status
 
-- Round 2 committed? PENDING - commit+push+release after user verification.
+> commit and push -> write replys to the issues and close them
+
+- Fixes committed (c50c8c7, rebased over the user's own commit 4db0aa5
+  'Add GUI images, note downloads') and pushed.
+- Replied + closed: #9, #11, #10, #12, #14, #15, #8 (root-cause notes +
+  which release it lands in). #9 was closed by the user mid-run; the
+  explanation comment was posted afterwards.
+- #13 remains OPEN (the user's commented issue) - the Window menu option
+  'Remember window size/position' is the opt-in for it.
+- All fixes are on main; they ship in the next release cut.
   were public ~25 min; history rewritten; GitHub support purge optional.
 
 ## Commands run
