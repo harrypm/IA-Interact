@@ -308,10 +308,20 @@
   double-click still works).
 - Both replied on the issues (fixed for next release). exe rebuilt.
 
+## Release v1.2.1 (2026-11-08)
+
+> trigger a new release
+
+- version.py was already at 1.2.0 (post-bump) -> no reset needed this time;
+  patch bump -> v1.2.1. RELEASE_NOTES.md restructured (New in @TAG@ = the
+  #13/#14 follow-up fixes; v1.2.0 content kept as history).
+- Run 42455859831 SUCCESS first try (macos-15 holding) -> "IA Interact
+  v1.2.1" published with window-only screenshots + all 5 binaries.
+
 ## Status
 
-- v1.2.0 released: https://github.com/harrypm/IA-Interact/releases/tag/v1.2.0
-- Round 3 fixes on main, awaiting the next release cut.
+- v1.2.1 released: https://github.com/harrypm/IA-Interact/releases/tag/v1.2.1
+- All issues closed; godzfire's #13/#14 follow-ups shipped.
 
 ## Commands run
 
