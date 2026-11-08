@@ -15,11 +15,15 @@ A native desktop client for uploading, downloading and managing Internet Archive
 
 ## New in @TAG@
 
-- **Window menu** (top bar) with user choices: **Remember window size/position** (opt-in; restores your last size/position on open), **Auto-expand folders when added**, and **Log uploads to .txt** (per-file upload record at `~/IA-Interact/uploads-log.txt`).
-- **Create Repository metadata fix** — the previous version's metadata write silently hit the website HTML page and wrote nothing (items showed the identifier as the title). Metadata now writes through the real JSON-Patch API and is verified to land: title, description, subject tags, collection, license, and custom fields.
+- **Remember-window fix** — with "Remember window size/position" enabled, the size/position you set on the Main Window is now kept after logging in (the post-login auto-fit no longer re-expands the window over your choice).
+- **Clearer expand controls** — the tree's expand/collapse markers are now square control-style **[+] / [-]** buttons; single-click the bracket to toggle, double-click the row still works.
+
+### In v1.2.0
+
+- **Window menu** (top bar) with user choices: **Remember window size/position** (opt-in), **Auto-expand folders when added**, and **Log uploads to .txt** (per-file upload record at `~/Documents/IA-Interact/uploads-log.txt`, on by default).
+- **Create Repository metadata fix** — the metadata write now goes through the real JSON-Patch API and is verified to land: title, description, subject tags, collection, license, and custom fields.
 - **Empty folders** show in folder view as `(0 files)` rows (uploads nothing — archive.org stores files only).
-- **Clickable +/−** tree markers (single-click expand/collapse; double-click the row still works).
-- **Expand all / Collapse all** buttons on both file viewers.
+- **Clickable +/−** tree markers and **Expand all / Collapse all** buttons on both file viewers.
 - **Progress panel** no longer squeezes the neighbouring panels during transfers.
 
 ## Highlights
