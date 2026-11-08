@@ -297,10 +297,21 @@
 - FINAL: run 42349626139 success -> "IA Interact v1.2.0" published with
   window-only CI screenshots + all 5 binaries.
 
+## Round 3 (2026-11-07): godzfire follow-ups on #13/#14
+
+- #13 follow-up: the post-login auto-fit was re-expanding the window over
+  the remembered size -> auto-fit now SKIPPED when remember-window is on
+  (verified: 1400x620 resize survives login; sizes below the 1060x560
+  minsize clamp by design).
+- #14 follow-up: plain +/- replaced with square control-style [+] / [-]
+  markers; the click region covers the whole bracket (single-click toggle,
+  double-click still works).
+- Both replied on the issues (fixed for next release). exe rebuilt.
+
 ## Status
 
 - v1.2.0 released: https://github.com/harrypm/IA-Interact/releases/tag/v1.2.0
-- All repo issues closed (#1-#15).
+- Round 3 fixes on main, awaiting the next release cut.
 
 ## Commands run
 

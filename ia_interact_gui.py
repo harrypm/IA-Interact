@@ -748,7 +748,12 @@ class IAInteractGUI(tk.Tk):
         self._ui_scale = max(1.0, min(2.0, dpi / 96.0))
 
     def _fit_window_to_content(self):
-        """Enlarge the window to fit the current content, clamped to the screen."""
+        """Enlarge the window to fit the current content, clamped to the screen.
+        Skipped when the user opted into "Remember window size/position" -
+        their remembered size must win over the content's preference
+        (otherwise the post-login re-fit wiped their size: issue #13)."""
+        if self.remember_window_var.get():
+            return
         try:
             self.update_idletasks()
             needed_w = self.main_frame.winfo_reqwidth() + 24
@@ -2361,8 +2366,8 @@ class IAInteractGUI(tk.Tk):
             if row["type"] == "folder":
                 count = len(row["file_indices"])
                 plural = "s" if count != 1 else ""
-                marker = "- " if not row.get("collapsed") else "+ "
-                self.remote_listbox.insert("end", f"{indent}{marker}{row['label']}  ({count} file{plural})")
+                marker = "[-]" if not row.get("collapsed") else "[+]"
+                self.remote_listbox.insert("end", f"{indent}{marker} {row['label']}  ({count} file{plural})")
             else:
                 self.remote_listbox.insert("end", f"{indent}{row['label']}")
 
@@ -2728,8 +2733,8 @@ class IAInteractGUI(tk.Tk):
             if row["type"] == "folder":
                 count = len(row["file_indices"])
                 plural = "s" if count != 1 else ""
-                marker = "- " if not row.get("collapsed") else "+ "
-                self.local_listbox.insert("end", f"{indent}{marker}{row['label']}  ({count} file{plural})")
+                marker = "[-]" if not row.get("collapsed") else "[+]"
+                self.local_listbox.insert("end", f"{indent}{marker} {row['label']}  ({count} file{plural})")
             else:
                 entry = self.local_files[row["file_index"]]
                 self.local_listbox.insert(
@@ -2755,7 +2760,8 @@ class IAInteractGUI(tk.Tk):
             return None
         import tkinter.font as tkfont
         char_width = tkfont.Font(font=event.widget["font"]).measure("0")
-        if event.x <= (row["depth"] * 4 + 2) * char_width:
+        # marker region: indent + the whole "[+] " control (4 chars)
+        if event.x <= (row["depth"] * 4 + 4) * char_width:
             path = row["path"]
             if path in expanded:
                 expanded.discard(path)
